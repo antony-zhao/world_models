@@ -1,0 +1,72 @@
+[project]
+name = "world-models"
+version = "0.1.0"
+description = "World models research codebase"
+requires-python = ">=3.12"
+dependencies = [
+    # PyTorch is installed separately with the CUDA index URL.
+    # Don't list it here.
+
+    # Mamba SSM and its deps
+    "mamba-ssm>=2.2.0",
+    "causal-conv1d>=1.4.0",
+    "einops>=0.8.0",
+
+    # RL environments
+    "gymnasium>=0.29.0",
+    "ale-py>=0.10.0",
+    "autorom[accept-rom-license]>=0.6.1",
+    "stable-baselines3>=2.3.0",
+
+    # Scientific stack
+    "numpy>=1.26",
+    "scipy>=1.13.0",
+
+    # Logging
+    "wandb>=0.18.0",
+    "tensorboard>=2.17.0",
+
+    # Config management
+    "hydra-core>=1.3.0",
+    "omegaconf>=2.3.0",
+
+    # Notebooks and plotting
+    "jupyter>=1.1.0",
+    "ipykernel>=6.29.0",
+    "matplotlib>=3.9.0",
+    "seaborn>=0.13.0",
+
+    # Quality of life
+    "tqdm>=4.66.0",
+    "rich>=13.8.0",
+
+    # Video recording
+    "imageio>=2.34.0",
+    "imageio-ffmpeg>=0.5.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.6.0",
+    "pytest>=8.3.0",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["world_models*"]
+
+[tool.uv]
+# mamba-ssm and causal-conv1d import torch in their setup.py without
+# declaring it as a build dependency, so they need to build in the active
+# env (where torch is already installed) rather than an isolated one.
+no-build-isolation-package = ["mamba-ssm", "causal-conv1d"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
