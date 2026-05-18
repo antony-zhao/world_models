@@ -1,7 +1,10 @@
 import copy
 
 import torch
+from mamba_ssm import Mamba2
+from mamba_ssm.ops.triton.layer_norm import RMSNorm, layer_norm_fn
 from torch import nn
+from torch.nn import functional as F
 
 
 class MLP(nn.Module):
@@ -105,9 +108,9 @@ class IMPALACNN(nn.Module):
 
 
 class ChannelNorm(nn.Module):
-    def __init__(self, num_channels, eps=1e-5):
+    def __init__(self, num_channels, eps=1e-6):
         super().__init__()
-        self.norm = nn.LayerNorm(num_channels, eps)
+        self.norm = nn.RMSNorm(num_channels, eps)
 
     def forward(self, x):
         x = x.permute(0, 2, 3, 1)
@@ -121,11 +124,11 @@ class DreamerMLP(nn.Module):
         super().__init__()
         layers = []
         layers.append(nn.Linear(input_dim, hidden_dim, bias=False))
-        layers.append(nn.LayerNorm(hidden_dim, eps=1e-5, elementwise_affine=True))
+        layers.append(nn.RMSNorm(hidden_dim, eps=1e-6))
         layers.append(act())
         for _ in range(num_hiddens):
             layers.append(nn.Linear(hidden_dim, hidden_dim, bias=False))
-            layers.append(nn.LayerNorm(hidden_dim, eps=1e-5, elementwise_affine=True))
+            layers.append(nn.RMSNorm(hidden_dim, eps=1e-6))
             layers.append(act())
         layers.append(nn.Linear(hidden_dim, output_dim))
         self.layers = nn.Sequential(*layers)
@@ -137,15 +140,7 @@ class DreamerMLP(nn.Module):
 class ContDreamerMLP(nn.Module):
     def __init__(self, input_dim, output_dim, hidden_dim, num_hiddens, act=nn.SiLU):
         super().__init__()
-        layers = []
-        layers.append(nn.Linear(input_dim, hidden_dim, bias=False))
-        layers.append(nn.LayerNorm(hidden_dim, eps=1e-5, elementwise_affine=True))
-        layers.append(act())
-        for _ in range(num_hiddens):
-            layers.append(nn.Linear(hidden_dim, hidden_dim, bias=False))
-            layers.append(nn.LayerNorm(hidden_dim, eps=1e-5, elementwise_affine=True))
-            layers.append(act())
-        self.layers = nn.Sequential(*layers)
+        self.layers = DreamerMLP(input_dim, output_dim, hidden_dim, num_hiddens, act)
         self.mean_head = nn.Linear(hidden_dim, output_dim)
         self.log_std_head = nn.Linear(hidden_dim, output_dim)
 
@@ -171,6 +166,25 @@ class BlockLinear(nn.Module):
         for i in range(self.num_blocks):
             output.append(self.networks[i](x_chunks[i]))
         return torch.cat(output, -1)
+
+
+class DreamerGRU(nn.Module):
+    def __init__(self, hidden_state_size, use_block_linear=True):
+        super().__init__()
+        if use_block_linear:
+            self.layer = BlockLinear(hidden_state_size, hidden_state_size * 3)
+        else:
+            self.layer = nn.Linear(hidden_state_size, hidden_state_size * 3)
+        self.hidden_state_size = hidden_state_size
+
+    def forward(self, x, h):
+        x = self.layer(x)
+        reset, cand, update = torch.split(x, self.hidden_state_size, -1)
+        reset = F.sigmoid(reset)
+        cand = F.tanh(reset * cand)
+        update = F.sigmoid(update - 1)
+        h_new = update * cand + (1 - update) * h
+        return h_new
 
 
 class TargetNetwork(nn.Module):
@@ -206,6 +220,38 @@ class TargetNetwork(nn.Module):
     @property
     def net(self):
         return self.network
+
+
+class MambaBlock(nn.Module):
+    def __init__(
+        self,
+        d_model,
+        layer_idx,
+        d_state=128,
+        d_conv=4,
+        expand=2,
+        headdim=64,
+    ):
+        super().__init__()
+        self.norm = nn.RMSNorm(d_model)
+        self.mamba = Mamba2(
+            d_model=d_model,
+            d_state=d_state,
+            d_conv=d_conv,
+            expand=expand,
+            headdim=headdim,
+            layer_idx=layer_idx,
+        )
+
+    def forward(self, x, inference_params=None):
+        return self.mamba(self.norm(x), inference_params=inference_params) + x
+
+    def allocate_inference_cache(self, batch_size, max_seqlen, **kwargs):
+        return self.mamba.allocate_inference_cache(batch_size, max_seqlen, **kwargs)
+
+
+class TransformerBlock(nn.Module):
+    pass
 
 
 def reparameterize_normal(mu, sigma):

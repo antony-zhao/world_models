@@ -1,7 +1,6 @@
-import torch
 from torch import nn
 
-from world_models.torch.common.models import ChannelNorm, NormAndAct
+from world_models.torch.common.models import ChannelNorm
 from world_models.torch.common.utils import compute_pad
 
 
@@ -31,11 +30,8 @@ class ConvDecoder(nn.Module):
                 )
             )
             if i < len(filters) - 1:
-                layers.append(
-                    NormAndAct(
-                        image_channels if i == len(filters) - 1 else filters[i + 1], norm, act
-                    )
-                )
+                layers.append(norm(filter))
+                layers.append(act())
         self.layers = nn.Sequential(*layers)
 
     def forward(self, x):

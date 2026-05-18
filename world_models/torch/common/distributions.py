@@ -3,12 +3,15 @@ from torch import autograd, distributions
 from torch.distributions import Independent, OneHotCategoricalStraightThrough
 
 
-class DreamerLatentDist:
+class DreamerLatentDist(distributions.Distribution):
     def __init__(self, probs=None, logits=None):
         self.dist = Independent(OneHotCategoricalStraightThrough(probs=probs, logits=logits), 1)
 
     def sample(self):
         return self.dist.sample()
+
+    def rsample(self):
+        return self.dist.rsample()
 
     def deterministic(self):
         return self.dist.mode()

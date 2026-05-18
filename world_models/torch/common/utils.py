@@ -35,6 +35,10 @@ def symlog_squared_error(y, y_hat):
     return ((symlog(y) - symlog(y_hat)) ** 2).sum(-1).mean()
 
 
+def make_state(latent, hidden):
+    return torch.cat([latent.flatten(-2), hidden], -1)
+
+
 def transform_obs(obs, is_image):
     if is_image:
         transformed_obs = obs / 255.0 - 0.5
