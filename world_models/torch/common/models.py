@@ -332,6 +332,8 @@ class TransformerBlock(nn.Module):
         dropout=0.0,
         act=nn.SiLU,
         is_causal=True,
+        use_sdpa=True,  # if true uses the "scaled_dot_product_attention"
+        # built into pytorch (that can take advantage of flash attention)
     ):
         super().__init__()
         assert d_model % num_heads == 0
@@ -350,12 +352,32 @@ class TransformerBlock(nn.Module):
         self.ff = TransformerFFNetwork(d_model, expand, dropout, act)
 
         self.rope = RotaryEmbedding(self.head_dim, max_seq_len=max_seq_len)
+        self.use_sdpa = use_sdpa
 
     def allocate_kv_cache(self, batch_size, device, dtype=torch.float32):
         shape = (batch_size, self.num_heads, self.max_seq_len, self.head_dim)
         cache_k = torch.zeros(shape, device=device, dtype=dtype)
         cache_v = torch.zeros(shape, device=device, dtype=dtype)
         return (cache_k, cache_v)
+
+    @staticmethod
+    def _manual_attention(q, k, v, is_causal=False):
+        """Manual scaled dot-product attention. Works for any T.
+
+        q: (B, H, T_q, D), k, v: (B, H, T_k, D)
+        Returns: (B, H, T_q, D)
+        """
+        scale = q.shape[-1] ** -0.5
+        scores = torch.matmul(q, k.transpose(-2, -1)) * scale
+        if is_causal:
+            T_q, T_k = q.shape[-2], k.shape[-2]
+            mask = torch.triu(
+                torch.ones(T_q, T_k, device=q.device, dtype=torch.bool),
+                diagonal=1,
+            )
+            scores = scores.masked_fill(mask, float("-inf"))
+        attn = F.softmax(scores, dim=-1)
+        return torch.matmul(attn, v)
 
     def forward(self, x, cache=None, seq_offset=0):
         h = self.rms1(x)
@@ -387,17 +409,20 @@ class TransformerBlock(nn.Module):
             v_full = v
             new_cache = None
 
-        # Causal mask only meaningful when T > 1 (parallel training mode)
-        # In step mode (T=1), the new query attends to all cached keys, no future to mask
-        is_causal = self.causal and T > 1
-
-        attn = F.scaled_dot_product_attention(
-            q,
-            k_full,
-            v_full,
-            is_causal=is_causal,
-            dropout_p=self.dropout if self.training else 0.0,
-        )
+        if T > 1 and self.use_sdpa:
+            is_causal = self.causal
+            attn = F.scaled_dot_product_attention(
+                q,
+                k_full,
+                v_full,
+                is_causal=is_causal,
+                dropout_p=self.dropout if self.training else 0.0,
+            )
+        else:
+            # Step mode never needs causal mask (single query attends to all keys).
+            # Parallel mode needs the causal mask.
+            is_causal = self.causal and T > 1
+            attn = self._manual_attention(q, k_full, v_full, is_causal=is_causal)
         attn = attn.transpose(1, 2).contiguous().view(B, T, self.d_model)
         attn = self.out_proj(attn)
         x = x + attn
