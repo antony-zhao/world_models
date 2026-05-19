@@ -4,7 +4,7 @@ import torch
 from mamba_ssm.utils.generation import InferenceParams
 from torch import nn
 
-from world_models.torch.common.models import DreamerGRU, DreamerMLP, MambaBlock
+from world_models.torch.common.models import DreamerGRU, DreamerMLP, MambaBlock, TransformerBlock
 
 
 class SequenceModel(nn.Module, ABC):
@@ -35,7 +35,7 @@ class RSSM(SequenceModel):
         hidden_dim=512,
         num_hiddens=2,
         act=nn.SiLU,
-        use_block_linear=False,
+        use_block_linear=True,
     ):
         super().__init__()
         in_proj = nn.Linear(d_model + latent_size + action_dim, hidden_dim * 3, bias=False)
@@ -146,13 +146,94 @@ class MambaSequenceModel(SequenceModel):
 
 
 class TransformerSequenceModel(SequenceModel):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        raise NotImplementedError
+    def __init__(
+        self,
+        latent_size,
+        action_dim,
+        d_model,
+        num_heads=8,
+        n_layers=2,
+        max_seq_len=1024,
+        expand=4,
+        dropout_p=0.0,
+        act=nn.SiLU,
+    ):
+        super().__init__()
+        in_proj = nn.Linear(latent_size + action_dim, d_model, bias=False)
+        act_fn = act()
+        self.proj = nn.Sequential(in_proj, act_fn)
+        self.blocks = nn.ModuleList(
+            [
+                TransformerBlock(d_model, num_heads, max_seq_len, expand, dropout_p, act)
+                for _ in range(n_layers)
+            ]
+        )
+        self.norm_f = nn.RMSNorm(d_model, eps=1e-6)
+        self.d_model = d_model
+        self.n_layers = n_layers
+        self.max_seq_len = max_seq_len
+
+    @property
+    def output_dim(self):
+        return self.d_model
+
+    def initial_state(self, batch_size, device):
+        caches = [
+            self.blocks[i].allocate_kv_cache(batch_size, device) for i in range(self.n_layers)
+        ]
+        return (caches, 0)  # (per-block caches, seq_offset)
+
+    def forward(self, latents, actions, state=None, dones=None):
+        x = torch.cat([latents, actions], -1)
+        x = self.proj(x)
+        B, T, _ = x.shape
+
+        if state is not None:
+            block_caches, seq_offset = state
+        else:
+            block_caches, seq_offset = [None] * self.n_layers, 0
+
+        new_caches = []
+        for block, cache in zip(self.blocks, block_caches):
+            x, new_cache = block(x, cache=cache, seq_offset=seq_offset)
+            new_caches.append(new_cache)
+
+        x = self.norm_f(x)
+
+        if state is not None:
+            new_state = (new_caches, seq_offset + T)
+        else:
+            new_state = None
+
+        return x, new_state
+
+    def step(self, latent, action, state, done=None):
+        latent_t = latent.unsqueeze(1)
+        action_t = action.unsqueeze(1)
+        output, state = self.forward(latent_t, action_t, state)
+        return output.squeeze(1), state
 
 
 if __name__ == "__main__":
+    # testing accuracy, compute time, and vram requirements, written by Claude.
     import time
+
+    def get_param_memory(model):
+        """Memory used by parameters and persistent buffers (bytes)."""
+        total = 0
+        for p in model.parameters():
+            total += p.numel() * p.element_size()
+        for b in model.buffers():
+            total += b.numel() * b.element_size()
+        return total
+
+    def fmt_bytes(b):
+        """Format bytes as MB or GB."""
+        if b < 1024**2:
+            return f"{b / 1024:.1f} KB"
+        if b < 1024**3:
+            return f"{b / 1024**2:.1f} MB"
+        return f"{b / 1024**3:.2f} GB"
 
     def _shape_and_timing_test(model, latent_size, action_dim, B=16, T=64, n_iters=100, atol=1e-5):
         device = next(model.parameters()).device
@@ -163,7 +244,7 @@ if __name__ == "__main__":
         actions = torch.randn(B, T, action_dim, device=device)
 
         # --- Shape checks ---
-        outputs, final_state = model(latents, actions)
+        outputs, _ = model(latents, actions)
         assert outputs.shape == (B, T, output_dim), (
             f"outputs shape {outputs.shape} != expected ({B}, {T}, {output_dim})"
         )
@@ -207,7 +288,7 @@ if __name__ == "__main__":
             _ = model(latents, actions)
         if is_cuda:
             torch.cuda.synchronize()
-        forward_time = (time.perf_counter() - start) / n_iters
+        forward_time = (time.perf_counter() - start) / n_iters * 1000
 
         s = model.initial_state(B, device)
         for _ in range(10):
@@ -222,229 +303,257 @@ if __name__ == "__main__":
                 _, s = model.step(latents[:, t], actions[:, t], s)
         if is_cuda:
             torch.cuda.synchronize()
-        step_time = (time.perf_counter() - start) / n_iters
+        step_time = (time.perf_counter() - start) / n_iters * 1000
 
-        print(
-            f"  forward (B={B}, T={T}): {forward_time * 1000:.2f} ms "
-            f"({forward_time / T * 1000:.3f} ms/step)"
-        )
-        print(
-            f"  step    (B={B}, T={T}): {step_time * 1000:.2f} ms "
-            f"({step_time / T * 1000:.3f} ms/step)"
-        )
+        print(f"  forward (B={B}, T={T}): {forward_time:.2f} ms ({forward_time / T:.3f} ms/step)")
+        print(f"  step    (B={B}, T={T}): {step_time:.2f} ms ({step_time / T:.3f} ms/step)")
 
-        # Add to your test
-        s = model.initial_state(B, device)
-        torch.cuda.synchronize()
+    def run_workload(model, latents, actions, mode, B, T, n_warmup, n_iters, track_memory=False):
+        """Run a single workload and return (time_ms, peak_memory_bytes_above_baseline)."""
+        device = next(model.parameters()).device
+        is_cuda = device.type == "cuda"
 
-        # First step
+        def sync():
+            if is_cuda:
+                torch.cuda.synchronize()
+
+        if mode == "forward":
+
+            def run():
+                return model(latents, actions)
+        elif mode == "forward+backward":
+
+            def run():
+                out, _ = model(latents, actions)
+                out.sum().backward()
+                model.zero_grad()
+        elif mode == "step_loop":
+
+            def run():
+                s = model.initial_state(B, device)
+                for t_idx in range(T):
+                    _, s = model.step(latents[:, t_idx], actions[:, t_idx], s)
+        elif mode == "step":
+            s = model.initial_state(B, device)
+
+            def run():
+                nonlocal s
+                _, s = model.step(latents[:, 0], actions[:, 0], s)
+
+        for _ in range(n_warmup):
+            run()
+        sync()
+
+        if track_memory and is_cuda:
+            torch.cuda.reset_peak_memory_stats(device)
+            baseline = torch.cuda.memory_allocated(device)
+
         start = time.perf_counter()
-        _, s = model.step(latents[:, 0], actions[:, 0], s)
-        torch.cuda.synchronize()
-        first_step_time = time.perf_counter() - start
+        for _ in range(n_iters):
+            run()
+        sync()
+        elapsed_ms = (time.perf_counter() - start) / n_iters * 1000
 
-        # Subsequent steps
-        n = 50
-        start = time.perf_counter()
-        for t in range(1, n + 1):
-            _, s = model.step(latents[:, t % T], actions[:, t % T], s)
-        torch.cuda.synchronize()
-        subsequent_step_time = (time.perf_counter() - start) / n
+        peak_bytes = 0
+        if track_memory and is_cuda:
+            peak_bytes = torch.cuda.max_memory_allocated(device) - baseline
 
-        print(f"  first step: {first_step_time * 1000:.2f} ms")
-        print(f"  subsequent step: {subsequent_step_time * 1000:.2f} ms")
+        return elapsed_ms, peak_bytes
 
-    cfg = dict(
-        latent_size=32 * 32,
-        action_dim=18,
-    )
+    def benchmark_config(name, model_factory, latent_size, action_dim, track_memory=True):
+        """Run the full workload suite on a single model configuration."""
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        try:
+            model = model_factory(latent_size=latent_size, action_dim=action_dim).to(device)
+        except Exception as e:
+            print(f"\n=== {name} ===")
+            print(f"  FAILED to construct: {e}")
+            return
+
+        n_params = sum(p.numel() for p in model.parameters())
+        d_model = model.output_dim
+        param_mem = get_param_memory(model)
+
+        print(f"\n=== {name} ===")
+        print(f"  d_model: {d_model}, parameters: {n_params:,} ({fmt_bytes(param_mem)})")
+
+        workloads = [
+            (16, 128, "forward+backward", "WM training (Drama config)", 5, 20),
+            (1024, 16, "step_loop", "Imagination (Drama config)", 3, 10),
+            (256, 16, "step_loop", "Imagination (smaller batch fallback)", 3, 10),
+            (1, 16, "forward", "Online inference (single env, context)", 5, 20),
+            (16, 16, "forward", "Online inference (vectorized 16 envs)", 5, 20),
+            (1, 1, "step", "Per-step inference (B=1)", 10, 50),
+        ]
+
+        for B, T, mode, desc, n_warmup, n_iters in workloads:
+            try:
+                latents = torch.randn(B, T, latent_size, device=device)
+                actions = torch.randn(B, T, action_dim, device=device)
+                t, peak_mem = run_workload(
+                    model,
+                    latents,
+                    actions,
+                    mode,
+                    B,
+                    T,
+                    n_warmup,
+                    n_iters,
+                    track_memory=track_memory,
+                )
+
+                mem_str = f"  ({fmt_bytes(peak_mem)})" if track_memory and device == "cuda" else ""
+
+                if mode == "step_loop":
+                    print(
+                        f"  B={B:>4} T={T:>3} {mode:<18} {t:>9.2f} ms \
+                              ({t / T:.2f} ms/step){mem_str} [{desc}]"
+                    )
+                else:
+                    print(f"  B={B:>4} T={T:>3} {mode:<18} {t:>9.2f} ms{mem_str} [{desc}]")
+
+                del latents, actions
+                if device == "cuda":
+                    torch.cuda.empty_cache()
+
+            except torch.cuda.OutOfMemoryError:
+                print(f"  B={B:>4} T={T:>3} {mode:<18}       OOM  [{desc}]")
+                if device == "cuda":
+                    torch.cuda.empty_cache()
+            except Exception as e:
+                print(f"  B={B:>4} T={T:>3} {mode:<18}    FAILED: {str(e)[:60]}")
+
+        del model
+        if device == "cuda":
+            torch.cuda.empty_cache()
+
+    cfg = dict(latent_size=32 * 32, action_dim=18)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # RSSM
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    # === Shape and consistency tests on small configs first ===
+    print("=" * 70)
+    print("Shape and consistency tests (small configs)")
+    print("=" * 70)
+
     rssm = RSSM(
+        d_model=512, hidden_dim=512, num_hiddens=2, use_block_linear=True, act=nn.SiLU, **cfg
+    ).to(device)
+    _shape_and_timing_test(rssm, **cfg, atol=1e-5)
+    del rssm
+    if device == "cuda":
+        torch.cuda.empty_cache()
+
+    if device == "cuda":
+        mamba = MambaSequenceModel(
+            d_model=512, n_layers=2, d_state=16, d_conv=4, expand=2, headdim=64, **cfg
+        ).to(device)
+        _shape_and_timing_test(mamba, **cfg, atol=1e-3)
+        del mamba
+        torch.cuda.empty_cache()
+
+    transformer = TransformerSequenceModel(
         d_model=512,
-        hidden_dim=512,
-        num_hiddens=2,
-        use_block_linear=False,
+        num_heads=8,
+        n_layers=2,
+        max_seq_len=256,
+        expand=4,
+        dropout_p=0.0,
         act=nn.SiLU,
         **cfg,
     ).to(device)
-    _shape_and_timing_test(rssm, **cfg, atol=1e-5)
-
-    # Mamba
+    _shape_and_timing_test(transformer, **cfg, atol=1e-3)
+    del transformer
     if device == "cuda":
-        mamba = MambaSequenceModel(
-            d_model=512,
-            n_layers=2,
-            d_state=128,
-            d_conv=4,
-            expand=2,
-            headdim=64,
-            **cfg,
-        ).to(device)
-        _shape_and_timing_test(mamba, **cfg, atol=1e-3)
-    else:
-        print("Skipping Mamba test (requires CUDA)")
+        torch.cuda.empty_cache()
 
-    def _scaling_sweep(model_factory, cfg, B=16, T_values=(16, 64, 256, 1024), n_iters=50):
-        """Measure forward and step time as T grows. Verifies parallel scan benefit."""
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"\n{model_factory.__name__} scaling sweep (B={B}, varying T):")
-        print(f"  {'T':>6} {'forward (ms)':>14} {'step (ms)':>14} {'fwd/step':>10}")
+    # === Production benchmark across configs ===
+    print()
+    print("=" * 70)
+    print("Production benchmark across configurations")
+    print("=" * 70)
 
-        for T in T_values:
-            model = model_factory(**cfg).to(device)
-            is_cuda = device == "cuda"
+    configs = [
+        (
+            "Drama published (d_model=512, n=2)",
+            lambda latent_size, action_dim: MambaSequenceModel(
+                d_model=512,
+                n_layers=2,
+                d_state=16,
+                d_conv=4,
+                expand=2,
+                headdim=64,
+                latent_size=latent_size,
+                action_dim=action_dim,
+            ),
+        ),
+        (
+            "Drama deep (d_model=1024, n=4)",
+            lambda latent_size, action_dim: MambaSequenceModel(
+                d_model=1024,
+                n_layers=4,
+                d_state=16,
+                d_conv=4,
+                expand=2,
+                headdim=64,
+                latent_size=latent_size,
+                action_dim=action_dim,
+            ),
+        ),
+        (
+            "STORM-sized Transformer (d_model=256, n=2)",
+            lambda latent_size, action_dim: TransformerSequenceModel(
+                d_model=256,
+                num_heads=8,
+                n_layers=2,
+                max_seq_len=256,
+                expand=4,
+                latent_size=latent_size,
+                action_dim=action_dim,
+            ),
+        ),
+        (
+            "Mid Transformer (d_model=512, n=4)",
+            lambda latent_size, action_dim: TransformerSequenceModel(
+                d_model=512,
+                num_heads=8,
+                n_layers=4,
+                max_seq_len=256,
+                expand=4,
+                latent_size=latent_size,
+                action_dim=action_dim,
+            ),
+        ),
+        (
+            "DreamerV3 S (d_model=512, ~18M)",
+            lambda latent_size, action_dim: RSSM(
+                d_model=512,
+                hidden_dim=512,
+                num_hiddens=2,
+                use_block_linear=True,
+                act=nn.SiLU,
+                latent_size=latent_size,
+                action_dim=action_dim,
+            ),
+        ),
+        (
+            "DreamerV3 XL (d_model=4096, ~200M)",
+            lambda latent_size, action_dim: RSSM(
+                d_model=4096,
+                hidden_dim=1024,
+                num_hiddens=5,
+                use_block_linear=True,
+                act=nn.SiLU,
+                latent_size=latent_size,
+                action_dim=action_dim,
+            ),
+        ),
+    ]
 
-            latents = torch.randn(B, T, cfg["latent_size"], device=device)
-            actions = torch.randn(B, T, cfg["action_dim"], device=device)
-
-            # Warmup
-            for _ in range(5):
-                _ = model(latents, actions)
-            if is_cuda:
-                torch.cuda.synchronize()
-
-            # Time forward
-            start = time.perf_counter()
-            for _ in range(n_iters):
-                _ = model(latents, actions)
-            if is_cuda:
-                torch.cuda.synchronize()
-            forward_time = (time.perf_counter() - start) / n_iters
-
-            # Time step
-            max_seq = max(T_values) + 16  # ensure we have headroom
-            s = (
-                model.initial_state(B, device, max_seq_len=max_seq)
-                if "Mamba" in model_factory.__name__
-                else model.initial_state(B, device)
-            )
-            for _ in range(5):
-                _, s = model.step(latents[:, 0], actions[:, 0], s)
-            if is_cuda:
-                torch.cuda.synchronize()
-
-            start = time.perf_counter()
-            for _ in range(n_iters):
-                s = (
-                    model.initial_state(B, device, max_seq_len=max_seq)
-                    if "Mamba" in model_factory.__name__
-                    else model.initial_state(B, device)
-                )
-                for t in range(T):
-                    _, s = model.step(latents[:, t], actions[:, t], s)
-            if is_cuda:
-                torch.cuda.synchronize()
-            step_time = (time.perf_counter() - start) / n_iters
-
-            ratio = step_time / forward_time
-            print(
-                f"  {T:>6} {forward_time * 1000:>14.2f} {step_time * 1000:>14.2f} {ratio:>10.2f}x"
-            )
-
-            # Cleanup to free GPU memory
-            del model, latents, actions
-            if is_cuda:
-                torch.cuda.empty_cache()
-
-    # Then in __main__:
-    def make_rssm(**cfg):
-        return RSSM(
-            d_model=512, hidden_dim=512, num_hiddens=2, use_block_linear=False, act=nn.SiLU, **cfg
+    for name, factory in configs:
+        benchmark_config(
+            name, factory, latent_size=cfg["latent_size"], action_dim=cfg["action_dim"]
         )
-
-    make_rssm.__name__ = "RSSM"
-
-    def make_mamba(**cfg):
-        return MambaSequenceModel(
-            d_model=512, n_layers=2, d_state=128, d_conv=4, expand=2, headdim=64, **cfg
-        )
-
-    make_mamba.__name__ = "MambaSequenceModel"
-
-    # # After your existing tests:
-    # _scaling_sweep(make_rssm, cfg)
-    # if device == "cuda":
-    #     _scaling_sweep(make_mamba, cfg)
-    def _production_benchmark(model, latent_size, action_dim, name):
-        """Benchmark at the actual shapes used during training."""
-        device = next(model.parameters()).device
-        print(f"\n=== {name} production benchmark ===")
-
-        workloads = [
-            # (B, T, mode, description)
-            (16, 128, "forward+backward", "WM training step (Drama config)"),
-            (1024, 16, "step_loop", "Imagination (Drama config)"),
-            (1, 16, "forward", "Online inference (Drama, single env)"),
-            (16, 16, "forward", "Online inference (vectorized 16 envs)"),
-            (1, 1, "step", "Per-step inference (B=1)"),
-        ]
-
-        for B, T, mode, desc in workloads:
-            latents = torch.randn(B, T, latent_size, device=device)
-            actions = torch.randn(B, T, action_dim, device=device)
-
-            if mode == "forward":
-                # Warmup
-                for _ in range(5):
-                    _ = model(latents, actions)
-                torch.cuda.synchronize()
-                # Time
-                start = time.perf_counter()
-                for _ in range(20):
-                    _ = model(latents, actions)
-                torch.cuda.synchronize()
-                t = (time.perf_counter() - start) / 20 * 1000
-                print(f"  B={B:>4} T={T:>3} {mode:<18} {t:>8.2f} ms  [{desc}]")
-
-            elif mode == "forward+backward":
-                for _ in range(5):
-                    out, _ = model(latents, actions)
-                    out.sum().backward()
-                    model.zero_grad()
-                torch.cuda.synchronize()
-                start = time.perf_counter()
-                for _ in range(20):
-                    out, _ = model(latents, actions)
-                    out.sum().backward()
-                    model.zero_grad()
-                torch.cuda.synchronize()
-                t = (time.perf_counter() - start) / 20 * 1000
-                print(f"  B={B:>4} T={T:>3} {mode:<18} {t:>8.2f} ms  [{desc}]")
-
-            elif mode == "step_loop":
-                # Test full imagination rollout
-                for _ in range(3):
-                    s = model.initial_state(B, device)
-                    for t_idx in range(T):
-                        _, s = model.step(latents[:, t_idx], actions[:, t_idx], s)
-                torch.cuda.synchronize()
-                start = time.perf_counter()
-                for _ in range(10):
-                    s = model.initial_state(B, device)
-                    for t_idx in range(T):
-                        _, s = model.step(latents[:, t_idx], actions[:, t_idx], s)
-                torch.cuda.synchronize()
-                t = (time.perf_counter() - start) / 10 * 1000
-                print(
-                    f"  B={B:>4} T={T:>3} {mode:<18} {t:>8.2f} ms  ({t / T:.2f} ms/step) [{desc}]"
-                )
-
-            elif mode == "step":
-                s = model.initial_state(B, device)
-                for _ in range(10):
-                    _, s = model.step(latents[:, 0], actions[:, 0], s)
-                torch.cuda.synchronize()
-                start = time.perf_counter()
-                for _ in range(50):
-                    _, s = model.step(latents[:, 0], actions[:, 0], s)
-                torch.cuda.synchronize()
-                t = (time.perf_counter() - start) / 50 * 1000
-                print(f"  B={B:>4} T={T:>3} {mode:<18} {t:>8.2f} ms  [{desc}]")
-
-            del latents, actions
-            torch.cuda.empty_cache()
-
-    _production_benchmark(rssm, 1024, 18, "rssm")
-    _production_benchmark(mamba, 1024, 18, "mamba")

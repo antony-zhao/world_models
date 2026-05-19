@@ -2,7 +2,6 @@ import copy
 
 import torch
 from mamba_ssm import Mamba2
-from mamba_ssm.ops.triton.layer_norm import RMSNorm, layer_norm_fn
 from torch import nn
 from torch.nn import functional as F
 
@@ -26,8 +25,6 @@ class MLP(nn.Module):
             hidden_dim = hidden_dims[0]
             self.skip_connections = False
         else:
-            self.skip_connections = True
-        if skip_connections is not None:
             self.skip_connections = skip_connections
         self.input_layer = nn.Linear(input_dim, hidden_dim)
         self.hiddens = []
@@ -89,10 +86,10 @@ class IMPALABlock(nn.Module):
 
 class IMPALACNN(nn.Module):
     def __init__(self, image_size, num_blocks, image_channels=3, channel_base=16, act=nn.GELU):
+        super().__init__()
         channels = [image_channels] + [channel_base * 2**i for i in range(num_blocks)]
         self.image_size = image_size
         self.image_channels = image_channels
-        super().__init__()
         self.layers = nn.Sequential(
             *[IMPALABlock(channels[i], channels[i + 1], act) for i in range(num_blocks)]
         )
@@ -246,12 +243,167 @@ class MambaBlock(nn.Module):
     def forward(self, x, inference_params=None):
         return self.mamba(self.norm(x), inference_params=inference_params) + x
 
-    def allocate_inference_cache(self, batch_size, max_seqlen, **kwargs):
-        return self.mamba.allocate_inference_cache(batch_size, max_seqlen, **kwargs)
+    def allocate_inference_cache(self, batch_size, max_seq_len, **kwargs):
+        return self.mamba.allocate_inference_cache(batch_size, max_seq_len, **kwargs)
+
+
+class RotaryEmbedding(nn.Module):
+    # From Claude
+    """RoPE — rotary position embeddings.
+
+    Reference: Su et al., "RoFormer: Enhanced Transformer with Rotary
+    Position Embedding" (https://arxiv.org/abs/2104.09864)
+
+    Applied to Q and K before attention. Each pair of dims rotates at
+    frequency 1 / base^(2i/dim).
+    """
+
+    def __init__(self, dim, base=10000.0, max_seq_len=4096):
+        super().__init__()
+        assert dim % 2 == 0, f"RoPE requires even dim, got {dim}"
+        self.dim = dim
+        self.base = base
+
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self._build_cache(max_seq_len)
+
+    def _build_cache(self, seq_len):
+        positions = torch.arange(seq_len, dtype=self.inv_freq.dtype, device=self.inv_freq.device)
+        freqs = torch.outer(positions, self.inv_freq)
+        emb = torch.cat([freqs, freqs], dim=-1)
+        self.register_buffer("cos_cached", emb.cos(), persistent=False)
+        self.register_buffer("sin_cached", emb.sin(), persistent=False)
+        self._cache_len = seq_len
+
+    @staticmethod
+    def _rotate_half(x):
+        half = x.shape[-1] // 2
+        x1 = x[..., :half]
+        x2 = x[..., half:]
+        return torch.cat([-x2, x1], dim=-1)
+
+    def forward(self, q, k, seq_offset=0):
+        """Apply RoPE to q and k.
+
+        q, k: (B, num_heads, T, head_dim)
+        seq_offset: starting position (nonzero during KV-cache step inference)
+        Returns: q_rot, k_rot of the same shape as inputs.
+        """
+        T = q.shape[-2]
+        end = seq_offset + T
+        if end > self._cache_len:
+            self._build_cache(end)
+
+        cos = self.cos_cached[seq_offset:end].to(dtype=q.dtype)
+        sin = self.sin_cached[seq_offset:end].to(dtype=q.dtype)
+        cos = cos.unsqueeze(0).unsqueeze(0)
+        sin = sin.unsqueeze(0).unsqueeze(0)
+
+        q_rot = q * cos + self._rotate_half(q) * sin
+        k_rot = k * cos + self._rotate_half(k) * sin
+        return q_rot, k_rot
+
+
+class TransformerFFNetwork(nn.Module):
+    def __init__(self, d_model, expand=2, dropout=0.0, act=nn.SiLU):
+        super().__init__()
+        self.lin1 = nn.Linear(d_model, d_model * expand, bias=False)
+        self.act = act()
+        self.lin2 = nn.Linear(d_model * expand, d_model, bias=False)
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+
+    def forward(self, x):
+        x = self.lin1(x)
+        x = self.act(x)
+        x = self.dropout(x)
+        x = self.lin2(x)
+        x = self.dropout(x)
+        return x
 
 
 class TransformerBlock(nn.Module):
-    pass
+    def __init__(
+        self,
+        d_model,
+        num_heads,
+        max_seq_len=4096,
+        expand=2,
+        dropout=0.0,
+        act=nn.SiLU,
+        is_causal=True,
+    ):
+        super().__init__()
+        assert d_model % num_heads == 0
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.head_dim = d_model // num_heads
+        self.max_seq_len = max_seq_len
+        self.dropout = dropout
+        self.causal = is_causal
+
+        self.rms1 = nn.RMSNorm(d_model)
+        self.qkv = nn.Linear(d_model, d_model * 3, bias=False)
+        self.out_proj = nn.Linear(d_model, d_model, bias=False)
+
+        self.rms2 = nn.RMSNorm(d_model)
+        self.ff = TransformerFFNetwork(d_model, expand, dropout, act)
+
+        self.rope = RotaryEmbedding(self.head_dim, max_seq_len=max_seq_len)
+
+    def allocate_kv_cache(self, batch_size, device, dtype=torch.float32):
+        shape = (batch_size, self.num_heads, self.max_seq_len, self.head_dim)
+        cache_k = torch.zeros(shape, device=device, dtype=dtype)
+        cache_v = torch.zeros(shape, device=device, dtype=dtype)
+        return (cache_k, cache_v)
+
+    def forward(self, x, cache=None, seq_offset=0):
+        h = self.rms1(x)
+        B, T, _ = h.shape
+
+        # Compute Q, K, V
+        qkv = self.qkv(h).view(B, T, 3, self.num_heads, self.head_dim)
+        qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, B, num_heads, T, head_dim)
+        q, k, v = qkv.unbind(dim=0)  # each: (B, num_heads, T, head_dim)
+
+        # Apply RoPE at the correct absolute positions
+        q, k = self.rope(q, k, seq_offset=seq_offset)
+
+        if cache is not None:
+            # Write new K, V into the cache at positions [seq_offset:seq_offset+T]
+            assert seq_offset + T <= self.max_seq_len, (
+                f"KV cache overflow: seq_offset={seq_offset}, T={T}, max_seq_len={self.max_seq_len}"
+            )
+            cache_k, cache_v = cache
+            cache_k[:, :, seq_offset : seq_offset + T] = k
+            cache_v[:, :, seq_offset : seq_offset + T] = v
+
+            # Use the filled portion only for attention
+            k_full = cache_k[:, :, : seq_offset + T]
+            v_full = cache_v[:, :, : seq_offset + T]
+            new_cache = (cache_k, cache_v)  # return the full buffer for next step
+        else:
+            k_full = k
+            v_full = v
+            new_cache = None
+
+        # Causal mask only meaningful when T > 1 (parallel training mode)
+        # In step mode (T=1), the new query attends to all cached keys, no future to mask
+        is_causal = self.causal and T > 1
+
+        attn = F.scaled_dot_product_attention(
+            q,
+            k_full,
+            v_full,
+            is_causal=is_causal,
+            dropout_p=self.dropout if self.training else 0.0,
+        )
+        attn = attn.transpose(1, 2).contiguous().view(B, T, self.d_model)
+        attn = self.out_proj(attn)
+        x = x + attn
+        x = x + self.ff(self.rms2(x))
+
+        return x, new_cache
 
 
 def reparameterize_normal(mu, sigma):
