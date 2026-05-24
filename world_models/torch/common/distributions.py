@@ -1,11 +1,22 @@
 import torch
+import torch.nn.functional as F
 from torch import autograd, distributions
 from torch.distributions import Independent, OneHotCategoricalStraightThrough
 
+from world_models.torch.common.utils import symexp, symlog
 
-class DreamerLatentDist(distributions.Distribution):
+
+class DreamerLatentDist:
     def __init__(self, probs=None, logits=None):
         self.dist = Independent(OneHotCategoricalStraightThrough(probs=probs, logits=logits), 1)
+
+    @property
+    def probs(self):
+        return self.dist.base_dist.probs
+
+    @property
+    def logits(self):
+        return self.dist.base_dist.logits
 
     def sample(self):
         return self.dist.sample()
@@ -13,8 +24,43 @@ class DreamerLatentDist(distributions.Distribution):
     def rsample(self):
         return self.dist.rsample()
 
-    def deterministic(self):
+    def mode(self):
         return self.dist.mode()
+
+
+class TwoHotEncoding:
+    def __init__(self, bins, logits=None, to_value=symexp, to_bin=symlog):
+        self.logits = logits
+        self.probs = torch.softmax(self.logits, -1)
+        self.bins = bins
+        self.to_value = to_value
+        self.to_bin = to_bin
+
+    def mean(self):
+        weighted_average = self.probs @ self.bins
+        return self.to_value(weighted_average)
+
+    def two_hot(self, vals):
+        index_1 = torch.bucketize(vals, self.bins) - 1
+        index_1 = index_1.clamp(0, len(self.bins) - 2)
+        index_2 = index_1 + 1
+        b_k = self.bins[index_1]
+        b_k2 = self.bins[index_2]
+        proportion_2 = torch.abs(b_k - vals) / torch.abs(b_k2 - b_k)
+        proportion_1 = torch.abs(b_k2 - vals) / torch.abs(b_k2 - b_k)
+        one_hot_1 = F.one_hot(index_1, len(self.bins))
+        one_hot_2 = F.one_hot(index_2, len(self.bins))
+        two_hot_encoded = (
+            proportion_1.unsqueeze(-1) * one_hot_1 + proportion_2.unsqueeze(-1) * one_hot_2
+        )
+        return two_hot_encoded
+
+    def log_prob(self, vals, aggregate=True):
+        # basically just the loss
+        target = self.two_hot(self.to_bin(vals)).detach()
+        log_probs = self.logits - torch.logsumexp(self.logits, dim=-1, keepdim=True)
+        loss = (target * log_probs).sum(-1)
+        return loss.mean() if aggregate else loss
 
 
 # safetanh code comes from torchrl

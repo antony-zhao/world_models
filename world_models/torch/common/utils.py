@@ -1,6 +1,5 @@
 import numpy as np
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 
@@ -35,8 +34,10 @@ def symlog_squared_error(y, y_hat):
     return ((symlog(y) - symlog(y_hat)) ** 2).sum(-1).mean()
 
 
-def make_state(latent, hidden):
-    return torch.cat([latent.flatten(-2), hidden], -1)
+def make_state(latent, seq_state):
+    if latent.ndim > seq_state.ndim:
+        latent = latent.flatten(-2)
+    return torch.cat([latent, seq_state], -1)
 
 
 def transform_obs(obs, is_image):
@@ -87,36 +88,5 @@ def compute_lambda_returns(values, rewards, continues, gamma, lambda_):
     return returns
 
 
-class TwoHotEncoding:
-    def __init__(self, bins, logits=None, forward=symexp, backward=symlog):
-        self.logits = logits
-        self.probs = torch.softmax(self.logits, -1)
-        self.bins = bins
-        self.forward = forward
-        self.backward = backward
-
-    def weighted_average(self):
-        weighted_average = self.probs @ self.bins
-        return self.forward(weighted_average)
-
-    def two_hot(self, vals):
-        index_1 = torch.bucketize(vals, self.bins) - 1
-        index_1 = index_1.clamp(0, len(self.bins) - 2)
-        index_2 = index_1 + 1
-        b_k = self.bins[index_1]
-        b_k2 = self.bins[index_2]
-        proportion_2 = torch.abs(b_k - vals) / torch.abs(b_k2 - b_k)
-        proportion_1 = torch.abs(b_k2 - vals) / torch.abs(b_k2 - b_k)
-        one_hot_1 = F.one_hot(index_1, len(self.bins))
-        one_hot_2 = F.one_hot(index_2, len(self.bins))
-        two_hot_encoded = (
-            proportion_1.unsqueeze(-1) * one_hot_1 + proportion_2.unsqueeze(-1) * one_hot_2
-        )
-        return two_hot_encoded
-
-    def log_prob(self, vals, aggregate=True):
-        # basically just the loss
-        target = self.two_hot(self.backward(vals)).detach()
-        log_probs = self.logits - torch.logsumexp(self.logits, dim=-1, keepdim=True)
-        loss = (target * log_probs).sum(-1)
-        return loss.mean() if aggregate else loss
+def compute_gae_returns():
+    raise NotImplementedError

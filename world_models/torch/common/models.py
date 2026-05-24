@@ -6,50 +6,67 @@ from torch import nn
 from torch.nn import functional as F
 
 
+class SkipLinear(nn.Module):
+    def __init__(self, dim, bias=True):
+        super().__init__()
+        self.dim = dim
+        self.linear = nn.Linear(dim, dim, bias=bias)
+
+    def forward(self, x):
+        return self.linear(x) + x
+
+    def extra_repr(self):
+        return f"dim={self.dim}"
+
+
 class MLP(nn.Module):
-    # if hidden dims is specified then doesn't use skip connections
+    """
+    Simple MLP class, main thing to note is if
+    n_layers is None it defaults to a single linear layer
+    n_layers == 1, it's an input and output linear (simplest MLP)
+    """
+
     def __init__(
         self,
         input_dim,
         output_dim,
         hidden_dim=256,
-        num_hiddens=2,
-        act=nn.GELU,
-        hidden_dims=None,
+        n_layers=2,
+        act=nn.SiLU,
+        norm=True,
         final_act=None,
         skip_connections=False,
     ):
         super().__init__()
-        if hidden_dims is not None:
-            assert len(hidden_dims) + 1 == num_hiddens
-            hidden_dim = hidden_dims[0]
-            self.skip_connections = False
-        else:
-            self.skip_connections = skip_connections
-        self.input_layer = nn.Linear(input_dim, hidden_dim)
-        self.hiddens = []
-        for i in range(num_hiddens):
-            if hidden_dims is None:
-                self.hiddens.append(nn.Linear(hidden_dim, hidden_dim))
+        if n_layers is None:
+            self.layers = nn.Linear(input_dim, output_dim)
+            return
+
+        def norm_act():
+            parts = []
+            if norm:
+                parts.append(nn.RMSNorm(hidden_dim, eps=1e-6))
+            parts.append(act())
+            return parts
+
+        layers = [nn.Linear(input_dim, hidden_dim, bias=not norm)]
+        layers.extend(norm_act())
+
+        for _ in range(n_layers):
+            if skip_connections:
+                layers.append(SkipLinear(hidden_dim, bias=not norm))
             else:
-                self.hiddens.append(nn.Linear(hidden_dim, hidden_dims[i + 1]))
-                hidden_dim = hidden_dims[i + 1]
-        self.hiddens = nn.ModuleList(self.hiddens)
-        self.output_layer = nn.Linear(hidden_dim, output_dim)
-        self.act = act()
-        self.final_act = final_act
+                layers.append(nn.Linear(hidden_dim, hidden_dim, bias=not norm))
+            layers.extend(norm_act())
+
+        layers.append(nn.Linear(hidden_dim, output_dim))
+        if final_act is not None:
+            layers.append(final_act())
+
+        self.layers = nn.Sequential(*layers)
 
     def forward(self, x):
-        x = self.act(self.input_layer(x))
-        for i in range(len(self.hiddens)):
-            if self.skip_connections:
-                x = self.act(self.hiddens[i](x)) + x
-            else:
-                x = self.act(self.hiddens[i](x))
-        logits = self.output_layer(x)
-        if self.final_act is not None:
-            return self.final_act(logits)
-        return logits
+        return self.layers(x)
 
 
 class ResBlock(nn.Module):
@@ -116,34 +133,64 @@ class ChannelNorm(nn.Module):
         return x
 
 
-class DreamerMLP(nn.Module):
-    def __init__(self, input_dim, output_dim, hidden_dim, num_hiddens, act=nn.SiLU):
-        super().__init__()
-        layers = []
-        layers.append(nn.Linear(input_dim, hidden_dim, bias=False))
-        layers.append(nn.RMSNorm(hidden_dim, eps=1e-6))
-        layers.append(act())
-        for _ in range(num_hiddens):
-            layers.append(nn.Linear(hidden_dim, hidden_dim, bias=False))
-            layers.append(nn.RMSNorm(hidden_dim, eps=1e-6))
-            layers.append(act())
-        layers.append(nn.Linear(hidden_dim, output_dim))
-        self.layers = nn.Sequential(*layers)
-
-    def forward(self, x):
-        return self.layers(x)
-
-
 class ContDreamerMLP(nn.Module):
     def __init__(self, input_dim, output_dim, hidden_dim, num_hiddens, act=nn.SiLU):
         super().__init__()
-        self.layers = DreamerMLP(input_dim, output_dim, hidden_dim, num_hiddens, act)
+        self.layers = MLP(input_dim, output_dim, hidden_dim, num_hiddens, act)
         self.mean_head = nn.Linear(hidden_dim, output_dim)
         self.log_std_head = nn.Linear(hidden_dim, output_dim)
 
     def forward(self, x):
         x = self.layers(x)
         return self.mean_head(x), self.log_std_head(x)
+
+
+class Posterior(nn.Module):
+    def __init__(
+        self,
+        embed_dim,
+        out_dim,
+        dist_head,
+        d_model=None,
+        n_layers=2,
+        hidden_dim=256,
+        includes_sequence_state=False,
+    ):
+        super().__init__()
+        if includes_sequence_state:
+            assert d_model is not None, "d_model required when includes_sequence_state=True"
+            in_dim = embed_dim + d_model
+        else:
+            in_dim = embed_dim
+        self.proj = MLP(in_dim, out_dim, hidden_dim, n_layers)
+        self.dist_head = dist_head
+        self.includes_sequence_state = includes_sequence_state
+
+    def forward(self, embedding, sequence_state=None):
+        if self.includes_sequence_state:
+            x = torch.cat([embedding, sequence_state], -1)
+        else:
+            x = embedding
+        x = self.proj(x)
+        return self.dist_head(x) if self.dist_head is not None else x
+
+
+class Prior(nn.Module):
+    def __init__(
+        self,
+        d_model,
+        out_dim,
+        dist_head,
+        n_layers=2,
+        hidden_dim=256,
+    ):
+        super().__init__()
+        self.proj = MLP(d_model, out_dim, hidden_dim, n_layers)
+        self.dist_head = dist_head
+
+    def forward(self, sequence_state):
+        x = self.proj(sequence_state)
+        return self.dist_head(x) if self.dist_head is not None else x
 
 
 class BlockLinear(nn.Module):

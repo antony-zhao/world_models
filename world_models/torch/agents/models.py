@@ -6,7 +6,7 @@ from torch.nn import functional as F
 from world_models.torch.common.decoders import ConvDecoder
 from world_models.torch.common.distributions import DreamerLatentDist
 from world_models.torch.common.encoders import ConvEncoder
-from world_models.torch.common.models import DreamerMLP
+from world_models.torch.common.models import MLP
 from world_models.torch.common.sequence_models import RSSM
 from world_models.torch.common.utils import (
     TwoHotEncoding,
@@ -51,7 +51,7 @@ class DreamerEncoder(nn.Module):
                 config.hidden_dim,
             )
             output_dim = config.hidden_dim
-        self.posterior = DreamerMLP(
+        self.posterior = MLP(
             output_dim + config.hidden_state_size,
             config.latent_size,
             config.hidden_dim,
@@ -108,7 +108,7 @@ class DreamerDecoder(nn.Module):
             )
         elif self.obs_type == "vector":
             self._in = None
-            self.decoder = DreamerMLP(
+            self.decoder = MLP(
                 config.state_size,
                 config.obs_dim,
                 config.hidden_dim,
@@ -124,7 +124,7 @@ class DreamerDecoder(nn.Module):
                 config.num_channels,
                 config.act,
             )
-            self.vec_decoder = DreamerMLP(
+            self.vec_decoder = MLP(
                 config.state_size,
                 config.obs_dim,
                 config.hidden_dim,
@@ -155,7 +155,7 @@ class Posterior(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.dynamics = DreamerMLP(
+        self.dynamics = MLP(
             config.state_size,
             config.latent_size,
             config.hidden_dim,
@@ -175,7 +175,7 @@ class Prior(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.dynamics = DreamerMLP(
+        self.dynamics = MLP(
             config.hidden_state_size,
             config.latent_size,
             config.hidden_dim,
