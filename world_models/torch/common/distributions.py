@@ -6,7 +6,7 @@ from torch.distributions import Independent, OneHotCategoricalStraightThrough
 from world_models.torch.common.utils import symexp, symlog
 
 
-class DreamerLatentDist:
+class DiscreteLatentDist:
     def __init__(self, probs=None, logits=None):
         self.dist = Independent(OneHotCategoricalStraightThrough(probs=probs, logits=logits), 1)
 

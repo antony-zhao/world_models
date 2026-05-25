@@ -2,7 +2,7 @@ import torch
 from torch import nn
 from torch.distributions import Bernoulli, Independent
 
-from world_models.torch.common.distributions import DreamerLatentDist, TwoHotEncoding
+from world_models.torch.common.distributions import DiscreteLatentDist, TwoHotEncoding
 from world_models.torch.common.models import MLP
 from world_models.torch.common.utils import symexp, symlog, unimix
 
@@ -19,7 +19,12 @@ class CategoricalHead(nn.Module):
         reshaped_logits = logits.reshape(*batch_dims, self.num_categories, self.num_codes)
         probs = torch.softmax(reshaped_logits, -1)
         unimixed_probs = unimix(probs, self.num_codes, self.unimix_prob)
-        return DreamerLatentDist(probs=unimixed_probs)
+        return DiscreteLatentDist(probs=unimixed_probs)
+
+
+class GaussianHead(nn.Module):
+    def __init__(self):
+        raise NotImplementedError
 
 
 class TwoHotHead(nn.Module):
@@ -56,6 +61,9 @@ class BernoulliHead(nn.Module):
         return Independent(Bernoulli(logits=logits), 1)
 
 
-class GaussianHead(nn.Module):
-    def __init__(self):
-        raise NotImplementedError
+class DiscreteActionHead(nn.Module):
+    pass
+
+
+class ContinuousActionHead(nn.Module):
+    pass

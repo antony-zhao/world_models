@@ -88,5 +88,20 @@ def compute_lambda_returns(values, rewards, continues, gamma, lambda_):
     return returns
 
 
-def compute_gae_returns():
-    raise NotImplementedError
+def compute_gae(rewards, values, dones, discount=0.99, lam=0.95):
+    # from here https://github.com/zplizzi/pytorch-ppo/blob/master/gae.py
+    # values is T+1, since it needs to include the value for the next_obs, also purely numpy
+    B, T = rewards.shape
+    next_value = values[:, -1]
+    advantages = np.zeros_like(rewards)
+    lastgaelam = 0
+    for t in reversed(range(T)):
+        nextnonterminal = 1.0 - dones[:, t]
+        if t == T - 1:
+            nextvalues = next_value
+        else:
+            nextvalues = values[t + 1]
+        delta = rewards[:, t] + discount * nextvalues * nextnonterminal - values[:, t]
+        advantages[:, t] = lastgaelam = delta + discount * lam * nextnonterminal * lastgaelam
+    returns = advantages + values[:, :-1]
+    return advantages, returns
