@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from torch.distributions import Bernoulli, Independent
+from torch.distributions import Bernoulli, Distribution, Independent
 
 from world_models.torch.common.distributions import DiscreteLatentDist, TwoHotEncoding
 from world_models.torch.common.models import MLP
@@ -46,7 +46,7 @@ class TwoHotHead(nn.Module):
         self.to_value = to_value
         self.to_bin = to_bin
 
-    def forward(self, x):
+    def forward(self, x) -> TwoHotEncoding:
         logits = self.proj(x)
         return TwoHotEncoding(self.bins, logits, self.to_value, self.to_bin)
 
@@ -56,7 +56,7 @@ class BernoulliHead(nn.Module):
         super().__init__()
         self.proj = MLP(in_dim, out_dim, hidden_dim, n_layers)
 
-    def forward(self, x):
+    def forward(self, x) -> Distribution:
         logits = self.proj(x)
         return Independent(Bernoulli(logits=logits), 1)
 

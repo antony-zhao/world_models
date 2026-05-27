@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 
 import torch
 from mamba_ssm.utils.generation import InferenceParams
-from torch import nn
+from torch import Tensor, nn
 
 from world_models.torch.common.models import (
     MLP,
@@ -21,6 +21,9 @@ class SequenceModel(nn.Module, ABC):
     """
 
     @abstractmethod
+    def initial_state(self, batch_size, device): ...
+
+    @abstractmethod
     def step(self, latent, action, model_state): ...
 
     def forward(self, *args, **kwargs):
@@ -32,7 +35,9 @@ class SequenceModel(nn.Module, ABC):
     @abstractmethod
     def output_dim(self): ...
 
-    def rollout(self, embeddings, actions, posterior, prior, dones=None):
+    def rollout(
+        self, embeddings, actions, posterior, prior, dones=None
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         # returns (latents, states, posterior_dists, prior_dists),
         # default is for mamba/transformer since those are the same,
         # as they can run through all the data in parallel
@@ -48,7 +53,7 @@ class SequenceModel(nn.Module, ABC):
             prior_dist.logits[:, :-1],
         )
 
-    def imagine_step(self, latent, action, model_state, prior):
+    def imagine_step(self, latent, action, model_state, prior) -> tuple[Tensor, Tensor, Tensor]:
         # returns next_latent, next_state, new_model_state
         seq_state, model_state = self.step(latent, action, model_state)
         prior_dist = prior(seq_state)
@@ -56,7 +61,9 @@ class SequenceModel(nn.Module, ABC):
         next_state = make_state(next_latent, seq_state)
         return next_latent, next_state, model_state
 
-    def imagine_rollout(self, initial_latent, initial_state, model_state, horizon, actor, prior):
+    def imagine_rollout(
+        self, initial_latent, initial_state, model_state, horizon, actor, prior
+    ) -> tuple[Tensor, Tensor, Tensor]:
         # returns imagined_states, imagined_latents, actions
         latent, state = initial_latent, initial_state
         latents, states, actions = [], [], []
@@ -193,7 +200,7 @@ class MambaSequenceModel(SequenceModel):
         }
         return inference_params
 
-    def parallel_forward(self, latents, actions, state=None, dones=None):
+    def parallel_forward(self, latents, actions, state=None):
         if latents.ndim > actions.ndim:
             latents = latents.flatten(-2)
         x = torch.cat([latents, actions], -1)
@@ -252,7 +259,7 @@ class TransformerSequenceModel(SequenceModel):
         ]
         return (caches, 0)  # (per-block caches, seq_offset)
 
-    def parallel_forward(self, latents, actions, state=None, dones=None):
+    def parallel_forward(self, latents, actions, state=None):
         if latents.ndim > actions.ndim:
             latents = latents.flatten(-2)
         x = torch.cat([latents, actions], -1)
