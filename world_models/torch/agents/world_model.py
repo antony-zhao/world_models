@@ -1,18 +1,11 @@
 import torch
 from torch import nn
-from torch.distributions import (
-    Independent,
-    OneHotCategoricalStraightThrough,
-    kl_divergence,
-)
+from torch.distributions import Independent, OneHotCategoricalStraightThrough, kl_divergence
 
 from world_models.torch.common.heads import BernoulliHead, TwoHotHead
 from world_models.torch.common.models import Posterior, Prior
 from world_models.torch.common.sequence_models import RSSM, SequenceModel
-from world_models.torch.common.utils import (
-    to_numpy,
-    transform_obs,
-)
+from world_models.torch.common.utils import to_numpy, transform_obs
 
 
 class WorldModel(nn.Module):
@@ -61,7 +54,7 @@ class WorldModel(nn.Module):
         # Returns the latent, state, and model_state (for rssm to reuse)
         transformed_obs = transform_obs(obs, self.is_image)
         obs_embedding = self.encoder(transformed_obs)
-        if type(self.sequence_model) is RSSM:
+        if isinstance(self.sequence_model, RSSM):
             # Passes in single obs and action
             post_dist = self.posterior(obs_embedding, model_state)
             latent = post_dist.mode() if det else post_dist.sample()
@@ -69,8 +62,8 @@ class WorldModel(nn.Module):
             _, model_state = self.sequence_model.step(latent, action, model_state)
         else:
             # Passes in a sequence of obs (o_{t-l}-o_t)
-            # and actions (a_{t-l}-o_{t-1})
-            post_dist = self.posterior(obs_embedding).sample()
+            # and actions (a_{t-l}-a_{t-1})
+            post_dist = self.posterior(obs_embedding)
             latent = post_dist.mode() if det else post_dist.sample()
             seq_state, _ = self.sequence_model.parallel_forward(latent[:, :-1], action)
             seq_state = seq_state[:, -1]
@@ -78,15 +71,48 @@ class WorldModel(nn.Module):
         return latent, seq_state, model_state
 
     @torch.no_grad()
-    def imagine(self, initial_latent, initial_state, model_state, horizon, actor):
+    def imagine(
+        self,
+        context_obs,
+        context_actions,
+        horizon,
+        actor,
+        dones=None,
+        initial_latent=None,
+        initial_seq=None,
+    ):
+        # The only reason to pass initial latent and initial sequence is to match SheepRL
+        # (and other similar Dreamer implementations) that pass the values from the
+        # world model loss/rollout. Don't ever use them for Mamba or Transformer
         self.eval()
         actor.eval()
-        latents, states, actions = self.sequence_model.imagine_rollout(
-            initial_latent, initial_state, model_state, horizon, actor
+        B, T, _ = context_actions.shape
+
+        transformed = transform_obs(context_obs, self.is_image)
+        embeddings = self.encoder(transformed)
+        if isinstance(self.sequence_model, RSSM):
+            if initial_latent is None or initial_seq is None:
+                latents, seq_states, _ = self.sequence_model.step_through(
+                    embeddings, context_actions, self.posterior, dones
+                )
+                initial_latent = latents[:, -1]
+                initial_seq = seq_states[:, -1]
+            model_state = initial_seq
+        else:
+            latents = self.posterior(embeddings).sample()
+            model_state = self.sequence_model.initial_state(B, context_actions.device)
+            seq_outputs, model_state = self.sequence_model.parallel_forward(
+                latents[:, :-1], context_actions[:, :-1], state=model_state
+            )
+            initial_latent = latents[:, -1]
+            initial_seq = seq_outputs[:, -1]
+
+        latents, actor_seq, head_seq, actions = self.sequence_model.imagine_rollout(
+            initial_latent, initial_seq, model_state, horizon, actor, self.prior
         )
         self.train()
         actor.train()
-        return latents, states, actions
+        return latents, actor_seq, head_seq, actions
 
     def world_model_loss(self, obs, actions, rewards, terminated, dones):
         transformed_obs = transform_obs(obs, self.is_image)

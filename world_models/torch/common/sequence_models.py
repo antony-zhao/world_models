@@ -58,11 +58,11 @@ class SequenceModel(nn.Module, ABC):
         return next_latent, seq_state, model_state  # returns {{z^hat}_{t+1}, d_t/h_{t+1}}
 
     def imagine_rollout(
-        self, initial_latent, initial_state, model_state, horizon, actor, prior
+        self, initial_latent, initial_seq, model_state, horizon, actor, prior
     ) -> tuple[Tensor, Tensor, Tensor]:
         # returns
         # imagined_latents, imagined_seq_states (actor), imagined_sequence_states (heads), actions
-        latent, seq_state = initial_latent, initial_state  # z_0, d_initial
+        latent, seq_state = initial_latent, initial_seq  # z_0, d_initial
         latents, seq_states, actions = [], [], []
 
         for t in range(horizon + 1):
@@ -133,11 +133,10 @@ class RSSM(SequenceModel):
         h_new = self.gru(x, hidden)
         return h_new, h_new
 
-    def rollout(self, embeddings, actions, posterior, prior, dones=None):
-        # returns (latents, states, posterior_dists, prior_dists),
+    def step_through(self, embeddings, actions, posterior, dones=None):
         B, T, _ = embeddings.shape
         latents, hiddens = [], []
-        post_logits, prior_logits = [], []
+        post_logits = []
 
         # starting from an initial h_0
         hidden = initial_hidden = self.initial_state_from_reference(embeddings)
@@ -147,33 +146,37 @@ class RSSM(SequenceModel):
             latent = post_dist.rsample()
 
             if i > 0:
-                prior_dist = prior(hidden)
                 post_logits.append(post_dist.logits)
-                prior_logits.append(prior_dist.logits)
 
             latents.append(latent)
             hiddens.append(hidden)
 
             _, hidden = self.step(latent, actions[:, i], hidden)  # h_{t+1} = f(z_t, a_t, h_t)
-
-            done = dones[:, i].unsqueeze(-1)
-            hidden = (1 - done) * hidden + done * initial_hidden  # update for episode boundaries
-            # seems correct, maybe return hiddens rather than states though? Seems fine here though
-            # since both the actor and heads take in z_t, h_t
+            if dones is not None:
+                done = dones[:, i].unsqueeze(-1)
+                hidden = (
+                    1 - done
+                ) * hidden + done * initial_hidden  # update for episode boundaries
 
         return (
             torch.stack(latents, 1),
             torch.stack(hiddens, 1),
             torch.stack(post_logits, 1),
-            torch.stack(prior_logits, 1),
         )
 
+    def rollout(self, embeddings, actions, posterior, prior, dones=None):
+        # returns (latents, states, posterior_dists, prior_dists),
+        latents, hiddens, post_logits = self.step_through(embeddings, actions, posterior, dones)
+        prior_logits = prior(hiddens).logits
+
+        return latents, hiddens, post_logits, prior_logits
+
     def imagine_rollout(
-        self, initial_latent, initial_state, model_state, horizon, actor, prior
+        self, initial_latent, initial_seq, model_state, horizon, actor, prior
     ) -> tuple[Tensor, Tensor, Tensor]:
         # returns
         # imagined_latents, imagined_seq_states (actor), imagined_sequence_states (heads), actions
-        latent, seq_state = initial_latent, initial_state  # z_0, h_0
+        latent, seq_state = initial_latent, initial_seq  # z_0, h_0
         latents, seq_states, actions = [], [], []
 
         for t in range(horizon + 1):
