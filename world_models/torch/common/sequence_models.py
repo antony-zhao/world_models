@@ -4,12 +4,7 @@ import torch
 from mamba_ssm.utils.generation import InferenceParams
 from torch import Tensor, nn
 
-from world_models.torch.common.models import (
-    MLP,
-    DreamerGRU,
-    MambaBlock,
-    TransformerBlock,
-)
+from world_models.torch.common.models import MLP, DreamerGRU, MambaBlock, TransformerBlock
 from world_models.torch.common.utils import make_state
 
 
@@ -43,43 +38,53 @@ class SequenceModel(nn.Module, ABC):
         # as they can run through all the data in parallel
         # RSSM has an override
         post_dist = posterior(embeddings, None)
-        latents = post_dist.rsample()
-        seq_state, _ = self.parallel_forward(latents, actions)
+        latents = post_dist.rsample()  # z_{0:T} = p(x_{0:T})
+        seq_state, _ = self.parallel_forward(latents, actions)  # d_{0:T} = f(z_{0:T}, a_{0:T})
         prior_dist = prior(seq_state)
         return (
             latents,
-            make_state(latents, seq_state),
+            seq_state,
             post_dist.logits[:, 1:],
             prior_dist.logits[:, :-1],
         )
 
     def imagine_step(self, latent, action, model_state, prior) -> tuple[Tensor, Tensor, Tensor]:
-        # returns next_latent, next_state, new_model_state
-        seq_state, model_state = self.step(latent, action, model_state)
+        # returns next_latent, seq_state, new_model_state
+        seq_state, model_state = self.step(
+            latent, action, model_state
+        )  # d_t or h_{t+1} = f(z_t, a_t, (h_t))
         prior_dist = prior(seq_state)
-        next_latent = prior_dist.sample()
-        next_state = make_state(next_latent, seq_state)
-        return next_latent, next_state, model_state
+        next_latent = prior_dist.sample()  # z_{t+1}
+        return next_latent, seq_state, model_state  # returns {{z^hat}_{t+1}, d_t/h_{t+1}}
 
     def imagine_rollout(
         self, initial_latent, initial_state, model_state, horizon, actor, prior
     ) -> tuple[Tensor, Tensor, Tensor]:
-        # returns imagined_states, imagined_latents, actions
-        latent, state = initial_latent, initial_state
-        latents, states, actions = [], [], []
+        # returns
+        # imagined_latents, imagined_seq_states (actor), imagined_sequence_states (heads), actions
+        latent, seq_state = initial_latent, initial_state  # z_0, d_initial
+        latents, seq_states, actions = [], [], []
 
         for t in range(horizon + 1):
-            action = actor(latent, state)
+            # a_t = pi(z_t, d_{t-1})
+            action = actor(latent, seq_state)
             latents.append(latent)
-            states.append(state)
+            seq_states.append(seq_state)
             actions.append(action)
             if t < horizon:
-                latent, state, model_state = self.imagine_step(latent, action, model_state, prior)
+                latent, seq_state, model_state = self.imagine_step(
+                    latent, action, model_state, prior
+                )
+            else:
+                # compute final d_t
+                seq_state, model_state = self.step(latent, action, model_state)
+                seq_states.append(seq_state)
 
-        latents = torch.stack(latents, 1)
-        states = torch.stack(states, 1)
+        latents = torch.stack(latents, 1)  # z_{0:T}
+        seq_states = torch.stack(seq_states, 1)
+        # For Mamba/Transformer this is d_{init:T}
         actions = torch.stack(actions, 1)
-        return latents, states, actions
+        return latents, seq_states[:, :-1], seq_states[:, 1:], actions
 
 
 class RSSM(SequenceModel):
@@ -131,12 +136,14 @@ class RSSM(SequenceModel):
     def rollout(self, embeddings, actions, posterior, prior, dones=None):
         # returns (latents, states, posterior_dists, prior_dists),
         B, T, _ = embeddings.shape
-        latents, states = [], []
+        latents, hiddens = [], []
         post_logits, prior_logits = [], []
+
+        # starting from an initial h_0
         hidden = initial_hidden = self.initial_state_from_reference(embeddings)
 
         for i in range(T):
-            post_dist = posterior(embeddings[:, i], hidden)
+            post_dist = posterior(embeddings[:, i], hidden)  # z_t = q(x_t, h_t)
             latent = post_dist.rsample()
 
             if i > 0:
@@ -144,21 +151,46 @@ class RSSM(SequenceModel):
                 post_logits.append(post_dist.logits)
                 prior_logits.append(prior_dist.logits)
 
-            state = make_state(latent, hidden)
             latents.append(latent)
-            states.append(state)
+            hiddens.append(hidden)
 
-            _, hidden = self.step(latent, actions[:, i], hidden)
+            _, hidden = self.step(latent, actions[:, i], hidden)  # h_{t+1} = f(z_t, a_t, h_t)
 
             done = dones[:, i].unsqueeze(-1)
-            hidden = (1 - done) * hidden + done * initial_hidden
+            hidden = (1 - done) * hidden + done * initial_hidden  # update for episode boundaries
+            # seems correct, maybe return hiddens rather than states though? Seems fine here though
+            # since both the actor and heads take in z_t, h_t
 
         return (
             torch.stack(latents, 1),
-            torch.stack(states, 1),
+            torch.stack(hiddens, 1),
             torch.stack(post_logits, 1),
             torch.stack(prior_logits, 1),
         )
+
+    def imagine_rollout(
+        self, initial_latent, initial_state, model_state, horizon, actor, prior
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        # returns
+        # imagined_latents, imagined_seq_states (actor), imagined_sequence_states (heads), actions
+        latent, seq_state = initial_latent, initial_state  # z_0, h_0
+        latents, seq_states, actions = [], [], []
+
+        for t in range(horizon + 1):
+            # a_t = pi(z_t, h_0)
+            action = actor(latent, seq_state)
+            latents.append(latent)
+            seq_states.append(seq_state)
+            actions.append(action)
+            if t < horizon:
+                latent, seq_state, model_state = self.imagine_step(
+                    latent, action, model_state, prior
+                )
+
+        latents = torch.stack(latents, 1)  # z_{0:T}
+        seq_states = torch.stack(seq_states, 1)  # h_{0:T}
+        actions = torch.stack(actions, 1)
+        return latents, seq_states, seq_states, actions
 
 
 class MambaSequenceModel(SequenceModel):
@@ -201,6 +233,8 @@ class MambaSequenceModel(SequenceModel):
         return inference_params
 
     def parallel_forward(self, latents, actions, state=None):
+        # same as the diagram, concatenates all of the z_t, a_t for s_t
+        # d_{0:T} = f(s_{0:T})
         if latents.ndim > actions.ndim:
             latents = latents.flatten(-2)
         x = torch.cat([latents, actions], -1)
@@ -208,12 +242,16 @@ class MambaSequenceModel(SequenceModel):
         for block in self.blocks:
             x = block(x, inference_params=state)
         x = self.norm_f(x)
+        if state is not None:
+            state.seqlen_offset += x.shape[1]
         return x, state
 
     def step(self, latent, action, state):
         latent_t = latent.unsqueeze(1)
         action_t = action.unsqueeze(1)
-        output, state = self.parallel_forward(latent_t, action_t, state)
+        output, state = self.parallel_forward(
+            latent_t, action_t, state
+        )  # notation is a bit awkward right now but returns d_t given z_t, a_t
         state.seqlen_offset += 1
         return output.squeeze(1), state
 
@@ -290,261 +328,3 @@ class TransformerSequenceModel(SequenceModel):
         action_t = action.unsqueeze(1)
         output, state = self.parallel_forward(latent_t, action_t, state)
         return output.squeeze(1), state
-
-
-if __name__ == "__main__":
-    import statistics
-    import time
-
-    from world_models.torch.common.heads import CategoricalHead
-    from world_models.torch.common.models import Posterior, Prior
-    from world_models.torch.common.utils import make_state
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    # ---------------------------------------------------------------- helpers
-
-    def build_heads(embed_dim, d_model, num_cat, num_codes, includes_h, device):
-        """Posterior + Prior with categorical dist heads. Posterior conditions
-        on the sequence state only for RSSM-style models (includes_h=True)."""
-        out_dim = num_cat * num_codes
-        posterior = Posterior(
-            embed_dim,
-            out_dim,
-            CategoricalHead(num_cat, num_codes),
-            d_model=d_model,
-            n_layers=1,
-            includes_sequence_state=includes_h,
-        ).to(device)
-        prior = Prior(
-            d_model,
-            out_dim,
-            CategoricalHead(num_cat, num_codes),
-            n_layers=1,
-        ).to(device)
-        return posterior, prior
-
-    def benchmark(fn, n_warmup=5, n_iters=20, backward=False):
-        """Time a zero-arg callable with CUDA-synced warmup + averaging.
-
-        If backward=True, fn must return a scalar to backprop.
-        Returns (mean_ms, std_ms, peak_mem_mb).
-        """
-        is_cuda = device == "cuda"
-
-        for _ in range(n_warmup):
-            out = fn()
-            if backward:
-                out.backward()
-        if is_cuda:
-            torch.cuda.synchronize()
-            torch.cuda.reset_peak_memory_stats()
-
-        times = []
-        for _ in range(n_iters):
-            if is_cuda:
-                torch.cuda.synchronize()
-                start = torch.cuda.Event(enable_timing=True)
-                end = torch.cuda.Event(enable_timing=True)
-                start.record()
-            else:
-                t0 = time.perf_counter()
-
-            out = fn()
-            if backward:
-                out.backward()
-
-            if is_cuda:
-                end.record()
-                torch.cuda.synchronize()
-                times.append(start.elapsed_time(end))
-            else:
-                times.append((time.perf_counter() - t0) * 1000.0)
-
-        peak_mem = (torch.cuda.max_memory_allocated() / 1e6) if is_cuda else 0.0
-        mean = statistics.mean(times)
-        std = statistics.stdev(times) if len(times) > 1 else 0.0
-        return mean, std, peak_mem
-
-    # ---------------------------------------------------------- shape + grad
-
-    def test_rollout(model, embed_dim, action_dim, num_cat, num_codes, includes_h, B=16, T=64):
-        d_model = model.output_dim
-        posterior, prior = build_heads(embed_dim, d_model, num_cat, num_codes, includes_h, device)
-
-        embeddings = torch.randn(B, T, embed_dim, device=device)
-        actions = torch.randn(B, T, action_dim, device=device)
-        dones = torch.zeros(B, T, device=device)
-        dones[1, T // 2] = 1.0  # exercise the done-reset path
-
-        latents, states, post_logits, prior_logits = model.rollout(
-            embeddings, actions, posterior, prior, dones=dones
-        )
-
-        name = model.__class__.__name__
-        print(f"\n=== {name} rollout (B={B}, T={T}) ===")
-        print(f"  latents:      {tuple(latents.shape)}")
-        print(f"  states:       {tuple(states.shape)}")
-        print(f"  post_logits:  {tuple(post_logits.shape)}")
-        print(f"  prior_logits: {tuple(prior_logits.shape)}")
-
-        assert latents.shape[:2] == (B, T), f"{name}: latents {latents.shape}"
-        assert states.shape[:2] == (B, T), f"{name}: states {states.shape}"
-        expected_width = num_cat * num_codes + d_model
-        assert states.shape[-1] == expected_width, (
-            f"{name}: state width {states.shape[-1]} != {expected_width}"
-        )
-        assert post_logits.shape[0] == B and prior_logits.shape[0] == B
-        assert post_logits.shape[1] == prior_logits.shape[1], (
-            f"{name}: post/prior logit lengths differ"
-        )
-        assert post_logits.shape[1] in (T, T - 1), (
-            f"{name}: KL logit time dim {post_logits.shape[1]} not in (T, T-1)"
-        )
-        (latents.sum() + post_logits.sum() + prior_logits.sum()).backward()
-        print("  shapes OK, backward OK")
-
-    def test_imagine(model, action_dim, num_cat, num_codes, B=1024, H=15):
-        d_model = model.output_dim
-        _, prior = build_heads(8, d_model, num_cat, num_codes, includes_h=False, device=device)
-
-        def actor(latent, state):
-            return torch.randn(B, action_dim, device=device)
-
-        model_state = model.initial_state(B, device)
-        init_latent = torch.randn(B, num_cat, num_codes, device=device)
-        init_seq = torch.randn(B, d_model, device=device)
-        init_state = make_state(init_latent, init_seq)
-
-        latents, states, actions = model.imagine_rollout(
-            init_latent, init_state, model_state, H, actor, prior
-        )
-        name = model.__class__.__name__
-        print(
-            f"  imagine: latents {tuple(latents.shape)}, "
-            f"states {tuple(states.shape)}, actions {tuple(actions.shape)}"
-        )
-        assert latents.shape[1] == H + 1, f"{name}: imagine horizon {latents.shape[1]} != {H + 1}"
-        assert actions.shape[1] == H + 1
-        print("  imagine shapes OK")
-
-    # ------------------------------------------------------------- timing
-
-    def time_model(
-        name,
-        model,
-        embed_dim,
-        action_dim,
-        num_cat,
-        num_codes,
-        includes_h,
-        B_train=16,
-        T_train=64,
-        B_imag=1024,
-        H=15,
-    ):
-        d_model = model.output_dim
-        posterior, prior = build_heads(embed_dim, d_model, num_cat, num_codes, includes_h, device)
-
-        emb = torch.randn(B_train, T_train, embed_dim, device=device)
-        act = torch.randn(B_train, T_train, action_dim, device=device)
-        dones = torch.zeros(B_train, T_train, device=device)
-
-        def rollout_fn():
-            model.zero_grad(set_to_none=True)
-            posterior.zero_grad(set_to_none=True)
-            prior.zero_grad(set_to_none=True)
-            latents, states, pl, prl = model.rollout(emb, act, posterior, prior, dones=dones)
-            return latents.sum() + pl.sum() + prl.sum()
-
-        r_mean, r_std, r_mem = benchmark(rollout_fn, backward=True)
-
-        def actor(latent, state):
-            return torch.randn(B_imag, action_dim, device=device)
-
-        init_latent = torch.randn(B_imag, num_cat, num_codes, device=device)
-        init_seq = torch.randn(B_imag, d_model, device=device)
-        init_state = make_state(init_latent, init_seq)
-
-        def imagine_fn():
-            with torch.no_grad():
-                # fresh state each iter — cache-based models (Mamba/Transformer)
-                # mutate state in place, so reusing it across iters is wrong.
-                model_state = model.initial_state(B_imag, device)
-                out = model.imagine_rollout(init_latent, init_state, model_state, H, actor, prior)
-                return out[0].sum()
-
-        i_mean, i_std, i_mem = benchmark(imagine_fn, backward=False)
-
-        peak = max(r_mem, i_mem)
-        print(f"{name:<24} {r_mean:>8.2f}±{r_std:<5.2f} {i_mean:>8.2f}±{i_std:<5.2f} {peak:>9.0f}")
-
-        del posterior, prior
-
-    # ---------------------------------------------------------------- run
-
-    embed_dim, action_dim = 256, 18
-    num_cat, num_codes = 32, 32
-    latent_size = num_cat * num_codes
-
-    # model factory list: (name, ctor, includes_h, needs_cuda)
-    factories = [
-        (
-            "RSSM-d512",
-            lambda: RSSM(latent_size, action_dim, d_model=512, hidden_dim=512),
-            True,
-            False,
-        ),
-        (
-            "RSSM-d8192",
-            lambda: RSSM(latent_size, action_dim, d_model=8192, hidden_dim=8192),
-            True,
-            False,
-        ),
-        (
-            "Mamba-d512-n2",
-            lambda: MambaSequenceModel(
-                latent_size, action_dim, d_model=512, n_layers=2, d_state=16
-            ),
-            False,
-            True,
-        ),
-        (
-            "Transformer-d512-n2",
-            lambda: TransformerSequenceModel(
-                latent_size, action_dim, d_model=512, num_heads=8, n_layers=2, max_seq_len=128
-            ),
-            False,
-            False,
-        ),
-    ]
-
-    print("=" * 70)
-    print("SHAPE + GRAD TESTS")
-    print("=" * 70)
-    for name, ctor, includes_h, needs_cuda in factories:
-        if needs_cuda and device != "cuda":
-            print(f"\n(skipping {name} — requires CUDA)")
-            continue
-        model = ctor().to(device)
-        test_rollout(model, embed_dim, action_dim, num_cat, num_codes, includes_h)
-        test_imagine(model, action_dim, num_cat, num_codes)
-        del model
-        if device == "cuda":
-            torch.cuda.empty_cache()
-
-    print("\n" + "=" * 70)
-    print("TIMING (warmup=5, iters=20)  —  rollout fwd+bwd / imagine, in ms")
-    print("=" * 70)
-    print(f"{'config':<24} {'rollout (ms)':>14} {'imagine (ms)':>14} {'peak MB':>10}")
-    print("-" * 70)
-    for name, ctor, includes_h, needs_cuda in factories:
-        if needs_cuda and device != "cuda":
-            continue
-        model = ctor().to(device)
-        time_model(name, model, embed_dim, action_dim, num_cat, num_codes, includes_h)
-        del model
-        if device == "cuda":
-            torch.cuda.empty_cache()
-
-    print("\nDone.")
