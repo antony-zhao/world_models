@@ -133,16 +133,35 @@ class ChannelNorm(nn.Module):
         return x
 
 
-class ContDreamerMLP(nn.Module):
-    def __init__(self, input_dim, output_dim, hidden_dim, num_hiddens, act=nn.SiLU):
+class ContMLP(nn.Module):
+    def __init__(
+        self,
+        input_dim,
+        output_dim,
+        hidden_dim,
+        num_hiddens,
+        act=nn.SiLU,
+        log_std_min=-5.0,
+        log_std_max=2.0,
+        std_min=0.1,
+    ):
         super().__init__()
-        self.layers = MLP(input_dim, output_dim, hidden_dim, num_hiddens, act)
+        self.mlp = MLP(input_dim, hidden_dim, hidden_dim, num_hiddens, act)
         self.mean_head = nn.Linear(hidden_dim, output_dim)
         self.log_std_head = nn.Linear(hidden_dim, output_dim)
+        self.log_std_min = log_std_min
+        self.log_std_max = log_std_max
+        self.std_min = std_min
 
     def forward(self, x):
-        x = self.layers(x)
-        return self.mean_head(x), self.log_std_head(x)
+        x = self.mlp(x)
+        mean = self.mean_head(x)
+        log_std_raw = self.log_std_head(x)
+        log_std = self.log_std_min + 0.5 * (self.log_std_max - self.log_std_min) * (
+            torch.tanh(log_std_raw) + 1.0
+        )
+        std = torch.exp(log_std) + self.std_min
+        return mean, std
 
 
 class Posterior(nn.Module):

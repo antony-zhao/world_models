@@ -36,6 +36,10 @@ class TwoHotEncoding:
         self.to_value = to_value
         self.to_bin = to_bin
 
+    @property
+    def logits(self):
+        return self.logits
+
     def mean(self):
         weighted_average = self.probs @ self.bins
         return self.to_value(weighted_average)

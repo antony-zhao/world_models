@@ -50,6 +50,9 @@ class TwoHotHead(nn.Module):
         logits = self.proj(x)
         return TwoHotEncoding(self.bins, logits, self.to_value, self.to_bin)
 
+    def make_dist_from_logits(self, logits):
+        return TwoHotEncoding(self.bins, logits, self.to_value, self.to_bin)
+
 
 class BernoulliHead(nn.Module):
     def __init__(self, in_dim, out_dim=1, hidden_dim=256, n_layers=2):

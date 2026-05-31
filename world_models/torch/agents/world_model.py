@@ -5,7 +5,7 @@ from torch.distributions import Independent, OneHotCategoricalStraightThrough, k
 from world_models.torch.common.heads import BernoulliHead, TwoHotHead
 from world_models.torch.common.models import Posterior, Prior
 from world_models.torch.common.sequence_models import RSSM, SequenceModel
-from world_models.torch.common.utils import to_numpy, transform_obs
+from world_models.torch.common.utils import make_state, to_numpy, transform_obs
 
 
 class WorldModel(nn.Module):
@@ -24,6 +24,7 @@ class WorldModel(nn.Module):
         repr_coef=0.1,
         head_coef=1.0,
         free_nats=1.0,
+        use_combined_state=False,
         decoder=None,
     ):
         super().__init__()
@@ -36,6 +37,7 @@ class WorldModel(nn.Module):
         self.reward_predictor = reward_predictor
         self.objective = objective
         self.is_image = obs_type == "image"
+        self.use_combined_state = use_combined_state
 
         self.obj_coef = obj_coef
         self.dyn_coef = dyn_coef
@@ -117,18 +119,37 @@ class WorldModel(nn.Module):
     def world_model_loss(self, obs, actions, rewards, terminated, dones):
         transformed_obs = transform_obs(obs, self.is_image)
         obs_embeddings = self.encoder(transformed_obs)
-        latents, states, post_logits, prior_logits = self.sequence_model.rollout(
+        latents, seq_states, post_logits, prior_logits = self.sequence_model.rollout(
             obs_embeddings, actions, self.posterior, self.prior, dones
         )
-        continue_dist = self.continue_predictor(states)
-        reward_twohot = self.reward_predictor(states)
-        if self.decoder is None:
-            reconstructions = None
+        if self.use_combined_state:
+            states = make_state(latents, seq_states)
+            continue_dist = self.continue_predictor(states)
+            reward_twohot = self.reward_predictor(states)
+            if self.decoder is None:
+                reconstructions = None
+            else:
+                reconstructions = self.decoder(states)
         else:
-            reconstructions = self.decoder(states)
-        obj_loss, loss_dict = self.objective(  # placeholder for now
-            transformed_obs, reconstructions, rewards, dones
-        )
+            continue_dist = self.continue_predictor(seq_states)
+            reward_twohot = self.reward_predictor(seq_states)
+            if self.decoder is None:
+                reconstructions = None
+            else:
+                reconstructions = self.decoder(latents)
+        context = {
+            "obs": transformed_obs,
+            "reconstructions": reconstructions,
+            "rewards": rewards,
+            "terminated": terminated,
+            "dones": dones,
+            "latents": latents,
+            "seq_states": seq_states,
+            "obs_embeddings": obs_embeddings,
+            "post_logits": post_logits,
+            "prior_logits": prior_logits,
+        }
+        obj_loss, loss_dict = self.objective(context)
         head_losses, head_loss_dict = self.head_losses(
             rewards, reward_twohot, terminated, continue_dist
         )
@@ -146,7 +167,7 @@ class WorldModel(nn.Module):
         return (
             loss,
             loss_dict,
-            states.detach(),
+            seq_states.detach(),
             obs_embeddings.detach(),
         )
 
@@ -155,8 +176,8 @@ class WorldModel(nn.Module):
         continue_error = -continue_dist.log_prob(1 - terminated.unsqueeze(-1)).mean()
         total_loss = reward_error + continue_error
         return total_loss, {
-            "loss/reward loss": to_numpy(reward_error),
-            "loss/continue loss": to_numpy(continue_error),
+            "loss/reward_loss": to_numpy(reward_error),
+            "loss/continue_loss": to_numpy(continue_error),
         }
 
     def dynamics_loss(self, post_logits, prior_logits):
