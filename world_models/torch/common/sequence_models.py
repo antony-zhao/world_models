@@ -202,12 +202,12 @@ class MambaSequenceModel(SequenceModel):
         latent_size,
         action_dim,
         d_model,
-        act=nn.SiLU,
         n_layers=2,
         d_state=128,
         d_conv=4,
         expand=2,
         headdim=64,
+        act=nn.SiLU,
     ):
         super().__init__()
         in_proj = nn.Linear(latent_size + action_dim, d_model, bias=False)

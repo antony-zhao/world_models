@@ -173,6 +173,7 @@ class Posterior(nn.Module):
         d_model=None,
         n_layers=2,
         hidden_dim=256,
+        act=nn.SiLU,
         includes_sequence_state=False,
     ):
         super().__init__()
@@ -195,14 +196,7 @@ class Posterior(nn.Module):
 
 
 class Prior(nn.Module):
-    def __init__(
-        self,
-        d_model,
-        out_dim,
-        dist_head,
-        n_layers=2,
-        hidden_dim=256,
-    ):
+    def __init__(self, d_model, out_dim, dist_head, n_layers=2, hidden_dim=256, act=nn.SiLU):
         super().__init__()
         self.proj = MLP(d_model, out_dim, hidden_dim, n_layers)
         self.dist_head = dist_head

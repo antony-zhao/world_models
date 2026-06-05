@@ -1,183 +1,150 @@
-class DreamerV3:
-    def __init__(self, config):
-        self.config = config
-        self.device = config.device
-        self.world_model = torch.compile(DreamerWorldModel(config).to(self.device))
-        self.actor = Actor(config).to(self.device)
-        self.critic = Critic(config, self.world_model.bins).to(self.device)
-        self.init_models()
-        self.critic_target = TargetNetwork(self.critic, config.critic_tau)
-        self.optim_wm = Adam(self.world_model.parameters(), config.wm_lr, eps=1e-5)
-        self.optim_actor = Adam(self.actor.parameters(), config.reinforce_lr, eps=1e-5)
-        self.optim_critic = Adam(self.critic.parameters(), config.reinforce_lr, eps=1e-5)
+import collections
 
-        act_dim = () if config.action_type == "discrete" else (config.action_dim,)
-        if config.obs_type == "image":
-            self.is_image = True
-            self.buffer = PerEnvBuffer(
-                config.num_envs,
-                [config.image_dim, act_dim, (), ()],
-                dtypes=[np.uint8, np.int32, np.float32, np.bool],
-                buffer_size=1_000_000,
-            )
-        elif config.obs_type == "vector":
-            self.is_image = False
-            self.buffer = PerEnvBuffer(
-                config.num_envs, [(config.obs_dim,), act_dim, (), ()], buffer_size=1_000_000
-            )
+import torch
+from torch import nn, optim
+from torch.nn import functional as F
+
+from world_models.torch.agents.builder import (
+    build_actor,
+    build_buffer,
+    build_critic,
+    build_world_model,
+)
+from world_models.torch.common.models import TargetNetwork
+from world_models.torch.common.sequence_models import RSSM
+from world_models.torch.common.utils import make_state, to_numpy, transform_obs
+
+
+class Agent(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        # build components
+        self.world_model = build_world_model(cfg.wm)
+        self.actor = build_actor(cfg.actor)
+        self.critic = build_critic(cfg.critic)
+        self.critic_target = TargetNetwork(self.critic, cfg.train.critic_tau)
+        self.buffer = build_buffer(cfg.buffer)
+
+        self.optim_wm = optim.Adam(
+            self.world_model.parameters(), cfg.optim.wm_lr, eps=cfg.optim.eps
+        )
+        self.optim_actor = optim.Adam(self.actor.parameters(), cfg.optim.ac_lr, eps=cfg.optim.eps)
+        self.optim_critic = optim.Adam(self.critic.parameters(), cfg.optim.ac_lr, eps=cfg.optim.eps)
+
+        self.is_rssm = isinstance(self.world_model.sequence_model, RSSM)
+        if self.is_rssm:
+            self.model_state = self.world_model.initial_state(cfg.num_envs, cfg.device)
+            self.history = None
         else:
-            raise NotImplementedError
-        # buffer needs to account for order in episodes
-        self.active_hidden = torch.zeros(config.num_envs, config.hidden_state_size).to(self.device)
-        self.eval_hidden = torch.zeros(1, config.hidden_state_size).to(self.device)
-        # the history for the environment itself, keeping track of it in here since
-        # it would be a bit weird to have this be in the main part of the program
+            self.model_state = None
+            self.history = collections.deque(maxlen=cfg.train.context_window)
 
-        self.range_ema = None
-        self.return_range_tau = config.return_range_tau
-        # Used for calculating the range of returns to help normalize the reinforce gradient
+        self.returns_range_ema = None
 
-        self.gamma = config.gamma
-        self.lambda_ = config.lambda_
-        self.percentiles = config.percentiles
-        self.action_type = config.action_type
-        self.num_actions = config.action_dim
+        self.device = cfg.device
+        self.num_envs = cfg.num_envs
+        self.action_type = cfg.action_type
+        self.action_dim = cfg.action_dim
+        self.horizon = cfg.train.horizon
+        self.gamma = cfg.train.gamma
+        self.lambda_ = cfg.train.lambda_
+        self.entropy_coef = cfg.train.entropy_coef
+        self.wm_batch_size = cfg.train.wm_batch_size
+        self.wm_seq_len = cfg.train.wm_seq_len
+        self.ac_batch_size = cfg.train.ac_batch_size
+        self.ac_seq_len = cfg.train.ac_seq_len
+        self.train_ac_after = cfg.train.train_ac_after
+        self.wm_clip = cfg.optim.wm_clip
+        self.ac_clip = cfg.optim.ac_clip
+        self.returns_pct_lo = cfg.train.returns_percentile_lo
+        self.returns_pct_hi = cfg.train.returns_percentile_hi
+        self.returns_ema_tau = cfg.train.returns_ema_tau
 
-    def choose_action(self, obs, det=False):
-        state, latent = self.obs_to_state(obs, self.active_hidden)
-        action = self.actor.policy_fn(state, det)
-        return action, latent
+        self.step_count = 0
 
-    def eval_action(self, obs, det=True, reset=False):
-        if reset:
-            self.eval_hidden = self.world_model._get_hidden(1)
-        state, latent = self.obs_to_state(obs, self.eval_hidden)
-        action = self.actor.policy_fn(state, det)
-        self.eval_hidden = self.world_model.recurrent_step(
-            self.eval_hidden, latent, action
-        ).detach()
-        return to_numpy(action)
+    # ---- env interaction ----------------------------------------------------
 
-    def process_sample(self, obs, latent, action, reward, done):
-        # do a step in RSSM and store stuff in buffer
-        self.buffer.add_sample([obs, to_numpy(action), reward, done])
+    def act(self, obs, det=False):
+        """
+        Args:
+            obs: (num_envs, *obs_shape) tensor on device
+            det: greedy if True
+        Returns:
+            action: (num_envs,) int (discrete) or (num_envs, action_dim) tensor (continuous)
+                    on CPU, raw form for env.step()
+        """
+        # 1. get (latent, seq_state) — branches on RSSM vs non-RSSM
+        # 2. state = make_state(latent, seq_state)
+        # 3. action = self.actor.policy_fn(state, det)
+        # 4. update online state (RSSM: model_state; non-RSSM: append to history)
+        # 5. return action.cpu()
+        ...
 
-        continue_ = torch.tensor(1 - done).unsqueeze(1).to(self.device)
-        self.active_hidden = (
-            continue_ * self.world_model.recurrent_step(self.active_hidden, latent, action)
-            + (1 - continue_) * self.world_model._get_hidden(self.config.num_envs)
-        ).detach()
+    def add_transition(self, obs, action, reward, terminated, truncated):
+        """
+        Args:
+            obs:        (num_envs, *obs_shape)
+            action:     (num_envs,) int or (num_envs, action_dim) tensor
+            reward:     (num_envs,) float
+            terminated: (num_envs,) bool
+            truncated:  (num_envs,) bool
+        """
+        # 1. store in buffer (per-env)
+        # 2. for non-RSSM: append (obs, action) to history
+        # 3. on done (per env): reset model_state (RSSM) or clear history (non-RSSM)
+        ...
 
-    def imagine_rollout(self, state, steps=None):
-        states = []
-        actions = []
-        action_log_probs = []
-        action_entropies = []
-        rewards = []
-        continues = []
-        for _ in range(self.config.rollout_length if steps is None else steps):
-            action_dist = self.actor.policy_dist(state)
-            action = self.actor.sample_action(action_dist).detach()
-            action_prob = action_dist.log_prob(action)
-            action_log_probs.append(action_prob)
-            action_entropy = action_dist.entropy()
-            action_entropies.append(action_entropy)
-            if self.config.action_type == "discrete":
-                action = F.one_hot(action.long(), self.config.action_dim).float()
-            (next_latent, next_hidden), reward, continue_ = self.world_model.imagine_step(
-                state[:, : self.config.latent_size], state[:, self.config.latent_size :], action
-            )
-            states.append(state.detach())
-            actions.append(action.detach())
-            rewards.append(reward.detach())
-            continues.append(continue_.squeeze().detach())
-            state = torch.concatenate([next_latent.flatten(-2), next_hidden], 1)
-        states.append(state.detach())
-        return (
-            torch.stack(states),
-            torch.stack(rewards),
-            torch.stack(continues),
-            torch.stack(action_log_probs),
-            torch.stack(action_entropies),
-        )
+    # ---- training -----------------------------------------------------------
 
-    def train(self):
-        obs, actions, rewards, dones = self.buffer.sample_as_tensors(
-            self.config.device, self.config.sample_batch_size, self.config.sample_seq_len
-        )
-        if self.config.action_type == "discrete":
-            actions = F.one_hot(actions.long(), self.config.action_dim).float()
-        with torch.amp.autocast(device_type="cuda"):
-            loss_wm, loss_dict, new_states, _ = self.world_model.world_model_loss(
-                obs, actions, rewards, dones
-            )
-        self.optim_wm.zero_grad(set_to_none=True)
-        loss_wm.backward()
-        torch.nn.utils.clip_grad_norm_(self.world_model.parameters(), 5)
-        self.optim_wm.step()
+    def train_step(self):
+        """One WM update; one AC update if past warmup. Returns merged metrics dict."""
+        # 1. sample WM batch
+        # 2. WM update
+        # 3. if buffer.size < train_ac_after: return WM metrics
+        # 4. sample AC batch
+        # 5. AC update
+        # 6. merge metrics, return
+        ...
 
-        if self.buffer.size < self.config.train_reinforce_after:
-            return loss_dict
+    def _train_world_model(self, obs, actions_oh, rewards, terminated, dones):
+        """
+        Returns: loss_dict
+        Steps: forward → backward → clip → step
+        """
+        ...
 
-        states, rewards, continues, log_probs, entropy = self.imagine_rollout(
-            new_states.reshape(-1, self.config.state_size)
-        )
-        continues[0] = 1 - dones.flatten()
+    def _train_actor_critic(self, context_obs, context_actions_oh, context_dones):
+        """
+        Returns: loss_dict with actor/critic/entropy losses and advantage stats.
+        Steps:
+          1. imagine_actor closure (samples + format_action)
+          2. self.world_model.imagine(...) → (latents, actor_seqs, head_seqs, actions_oh)
+          3. predict rewards, continues from head_seqs
+          4. critic on actor_states, target_critic for bootstrap
+          5. compute_lambda_returns → returns (length H)
+          6. recompute actor dist on actor_states for log_prob and entropy
+          7. advantages = returns - values[:, :-1].detach(); normalize via _normalize_advantages
+          8. actor_loss = -(adv.detach() * log_probs[:, :-1]).mean() - entropy_coef * entropy[:, :-1].mean()
+          9. critic_loss = -critic.make_dist(value_logits[:, :-1]).log_prob(returns.detach()).mean()
+         10. critic backward + step; actor backward + step
+         11. critic_target.update()
+        """
+        ...
 
-        with torch.amp.autocast(device_type="cuda"):
-            loss_critic, returns, values = self.reinforce_critic_loss(states, rewards, continues)
-            loss_actor, actor_ent = self.reinforce_actor_loss(returns, values, log_probs, entropy)
+    def _normalize_advantages(self, returns, advantages):
+        """Percentile range of returns, EMA-smoothed, divides advantages. Returns normalized adv."""
+        ...
 
-        self.optim_critic.zero_grad(set_to_none=True)
-        loss_critic.backward()
-        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 5)
-        self.optim_critic.step()
-        self.optim_actor.zero_grad(set_to_none=True)
-        loss_actor.backward()
-        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 5)
-        self.optim_actor.step()
+    def _actions_to_model_input(self, actions):
+        """Discrete: int → one-hot. Continuous: passthrough."""
+        ...
 
-        loss_dict["loss/actor loss"] = to_numpy(loss_actor)
-        loss_dict["loss/critic loss"] = to_numpy(loss_critic)
-        loss_dict["loss/actor entropy"] = to_numpy(actor_ent)
-        return loss_dict
+    # ---- checkpoint ---------------------------------------------------------
 
-    def reinforce_actor_loss(self, returns, values, action_log_probs, entropy):
-        range_ = torch.quantile(returns, 1 - self.percentiles) - torch.quantile(
-            returns, self.percentiles
-        )
-        if self.range_ema is not None:
-            self.range_ema = (
-                range_ * self.return_range_tau + self.range_ema * (1 - self.return_range_tau)
-            ).detach()
-        else:
-            self.range_ema = range_
+    def state_dict_full(self): ...
+    def load_state_dict_full(
+        self, state
+    ): ...  # ---- checkpoint ---------------------------------------------------------
 
-        adv = ((returns - values) / torch.clip(self.range_ema, min=1)).detach()
-        actor_loss = -(adv * action_log_probs + entropy * self.config.entropy_coef)
-        actor_loss = actor_loss.mean()
-        return actor_loss, entropy.mean()
-
-    def reinforce_critic_loss(self, states, rewards, continues):
-        self.critic_target.update()
-        values, value_logits = self.critic(states)
-        value_target, _ = self.critic_target(states)
-        returns = compute_lambda_returns(values, rewards, continues, self.gamma, self.lambda_)
-        value_bins = WeightedAverageOverBins(self.world_model.bins, value_logits[:-1])
-        loss = -value_bins.log_prob(returns.detach(), aggregate=False)
-        loss -= value_bins.log_prob(value_target.detach()[:-1], aggregate=False)
-        loss = loss.mean()
-        return (
-            loss,
-            returns.detach(),
-            values.detach()[:-1],
-        )  # returning returns and values for the actor to reuse later
-
-    def obs_to_state(self, obs, hidden=None):
-        if hidden is None:
-            hidden = self.world_model._get_hidden(obs.shape[0])
-        transformed_obs = transform_obs(obs, self.is_image)
-        latent_prob = self.world_model.encoder(transformed_obs, hidden)
-        latent = Independent(OneHotCategoricalStraightThrough(latent_prob), 1).sample()
-        state = make_state(latent, hidden)
-        return state, latent
+    def state_dict_full(self): ...
+    def load_state_dict_full(self, state): ...

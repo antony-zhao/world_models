@@ -38,11 +38,12 @@ class TwoHotHead(nn.Module):
         n_layers=2,
         to_value=symexp,
         to_bin=symlog,
+        act=nn.SiLU,
     ):
         super().__init__()
         bins = torch.linspace(bin_low, bin_high, num_bins)
         self.register_buffer("bins", bins)
-        self.proj = MLP(in_dim, num_bins, hidden_dim, n_layers)
+        self.proj = MLP(in_dim, num_bins, hidden_dim, n_layers, act)
         self.to_value = to_value
         self.to_bin = to_bin
 
@@ -55,9 +56,9 @@ class TwoHotHead(nn.Module):
 
 
 class BernoulliHead(nn.Module):
-    def __init__(self, in_dim, out_dim=1, hidden_dim=256, n_layers=2):
+    def __init__(self, in_dim, out_dim=1, hidden_dim=256, n_layers=2, act=nn.SiLU):
         super().__init__()
-        self.proj = MLP(in_dim, out_dim, hidden_dim, n_layers)
+        self.proj = MLP(in_dim, out_dim, hidden_dim, n_layers, act)
 
     def forward(self, x) -> Distribution:
         logits = self.proj(x)

@@ -24,21 +24,22 @@ class DiscreteLatentDist:
     def rsample(self):
         return self.dist.rsample()
 
+    @property
     def mode(self):
-        return self.dist.mode()
+        return self.dist.mode
 
 
 class TwoHotEncoding:
     def __init__(self, bins, logits=None, to_value=symexp, to_bin=symlog):
-        self.logits = logits
-        self.probs = torch.softmax(self.logits, -1)
+        self._logits = logits
+        self.probs = torch.softmax(self._logits, -1)
         self.bins = bins
         self.to_value = to_value
         self.to_bin = to_bin
 
     @property
     def logits(self):
-        return self.logits
+        return self._logits
 
     def mean(self):
         weighted_average = self.probs @ self.bins
@@ -62,7 +63,7 @@ class TwoHotEncoding:
     def log_prob(self, vals, aggregate=True):
         # basically just the loss
         target = self.two_hot(self.to_bin(vals)).detach()
-        log_probs = self.logits - torch.logsumexp(self.logits, dim=-1, keepdim=True)
+        log_probs = self._logits - torch.logsumexp(self._logits, dim=-1, keepdim=True)
         loss = (target * log_probs).sum(-1)
         return loss.mean() if aggregate else loss
 
@@ -152,12 +153,17 @@ class SafeTanhNormal(distributions.TransformedDistribution):
     def __init__(self, loc, scale, lower_bound=-1.0, upper_bound=1.0):
         base_dist = distributions.Normal(loc, scale)
 
-        affine_scale = (upper_bound - lower_bound) / 2.0
-        affine_loc = (upper_bound + lower_bound) / 2.0
+        self.affine_scale = (upper_bound - lower_bound) / 2.0
+        self.affine_loc = (upper_bound + lower_bound) / 2.0
+        self.loc = loc
 
         transforms = [
             SafeTanhTransform(),
-            distributions.AffineTransform(loc=affine_loc, scale=affine_scale),
+            distributions.AffineTransform(loc=self.affine_loc, scale=self.affine_scale),
         ]
 
         super().__init__(base_dist, transforms)
+
+    @property
+    def mode(self):
+        return self.affine_loc + self.affine_scale * torch.tanh(self.loc)

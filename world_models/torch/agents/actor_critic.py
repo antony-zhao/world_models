@@ -91,7 +91,7 @@ class Critic(nn.Module):
     def forward(self, x):
         logits = self.mlp(x)
         twohot = self.twohot(logits)
-        return twohot.weighted_average(), twohot.logits
+        return twohot.mean(), twohot.logits
 
     def make_dist(self, logits):
         return self.twohot.make_dist_from_logits(logits)
