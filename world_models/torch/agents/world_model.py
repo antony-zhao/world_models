@@ -48,29 +48,38 @@ class WorldModel(nn.Module):
     def initial_state(self, batch_size, device):
         return self.sequence_model.initial_state(batch_size, device)
 
-    def step_obs(self, obs, action, model_state=None, det=False):
+    def step_obs_rssm(self, obs, prev_action, prev_latent, prev_done, model_state, det=False):
         # action should be preprocessed into one_hot before being passed here
-        # RSSM and Transformer/Mamba have pretty big differences, RSSM handles the model state
-        # Whereas the others take in a sequence of observations and actions to produce the
-        # output state/latents.
-        # Returns the latent, state, and model_state (for rssm to reuse)
+        # takes in x_t, a_{t-1}, z_{t-1}
+        # returns the latent (z_t), seq_state (h_t)
+        if not isinstance(self.sequence_model, RSSM):
+            raise TypeError(
+                f"step_obs_rssm requires RSSM, got {type(self.sequence_model).__name__}"
+            )
         transformed_obs = transform_obs(obs, self.is_image)
         obs_embedding = self.encoder(transformed_obs)
+        # Passes in single obs and action
+        seq_state, _ = self.sequence_model.step(prev_latent, prev_action, model_state)
+        seq_state = (
+            seq_state * (1 - prev_done)
+            + self.sequence_model.initial_state_from_reference(prev_done) * prev_done
+        )
+        post_dist = self.posterior(obs_embedding, seq_state)
+        latent = post_dist.mode() if det else post_dist.sample()
+
+        return latent, seq_state
+
+    def step_obs_window(self, obs_window, action_window, det=False):
+        # Passes in a sequence of obs (o_{t-l}-o_t)
+        # and actions (a_{t-l}-a_{t-1})
         if isinstance(self.sequence_model, RSSM):
-            # Passes in single obs and action
-            post_dist = self.posterior(obs_embedding, model_state)
-            latent = post_dist.mode() if det else post_dist.sample()
-            seq_state = model_state
-            _, model_state = self.sequence_model.step(latent, action, model_state)
-        else:
-            # Passes in a sequence of obs (o_{t-l}-o_t)
-            # and actions (a_{t-l}-a_{t-1})
-            post_dist = self.posterior(obs_embedding)
-            latent = post_dist.mode() if det else post_dist.sample()
-            seq_state, _ = self.sequence_model.parallel_forward(latent[:, :-1], action)
-            seq_state = seq_state[:, -1]
-            latent = latent[:, -1]
-        return latent, seq_state, model_state
+            raise TypeError("step_obs_window is for Mamba/Transformer; use step_obs_rssm for RSSM")
+        transformed_obs = transform_obs(obs_window, self.is_image)
+        obs_embedding = self.encoder(transformed_obs)
+        post_dist = self.posterior(obs_embedding)
+        latent = post_dist.mode() if det else post_dist.sample()
+        seq_state, _ = self.sequence_model.parallel_forward(latent[:, :-1], action_window)
+        return latent[:, -1], seq_state[:, -1]
 
     @torch.no_grad()
     def imagine(
@@ -90,10 +99,10 @@ class WorldModel(nn.Module):
         actor.eval()
         B, T, _ = context_actions.shape
 
-        transformed = transform_obs(context_obs, self.is_image)
-        embeddings = self.encoder(transformed)
         if isinstance(self.sequence_model, RSSM):
             if initial_latent is None or initial_seq is None:
+                transformed = transform_obs(context_obs, self.is_image)
+                embeddings = self.encoder(transformed)
                 latents, seq_states, _ = self.sequence_model.step_through(
                     embeddings, context_actions, self.posterior, dones
                 )
@@ -101,6 +110,8 @@ class WorldModel(nn.Module):
                 initial_seq = seq_states[:, -1]
             model_state = initial_seq
         else:
+            transformed = transform_obs(context_obs, self.is_image)
+            embeddings = self.encoder(transformed)
             latents = self.posterior(embeddings).sample()
             model_state = self.sequence_model.initial_state(B, context_actions.device)
             seq_outputs, model_state = self.sequence_model.parallel_forward(
@@ -131,6 +142,8 @@ class WorldModel(nn.Module):
             else:
                 reconstructions = self.decoder(states)
         else:
+            if latents.ndim > seq_states.ndim:
+                latents = latents.flatten(-2)
             continue_dist = self.continue_predictor(seq_states)
             reward_twohot = self.reward_predictor(seq_states)
             if self.decoder is None:
@@ -167,8 +180,8 @@ class WorldModel(nn.Module):
         return (
             loss,
             loss_dict,
+            latents.detach(),
             seq_states.detach(),
-            obs_embeddings.detach(),
         )
 
     def head_losses(self, reward, reward_twohot, terminated, continue_dist):
@@ -176,8 +189,8 @@ class WorldModel(nn.Module):
         continue_error = -continue_dist.log_prob(1 - terminated.unsqueeze(-1)).mean()
         total_loss = reward_error + continue_error
         return total_loss, {
-            "loss/reward_loss": to_numpy(reward_error),
-            "loss/continue_loss": to_numpy(continue_error),
+            "wm/loss/reward_loss": to_numpy(reward_error),
+            "wm/loss/continue_loss": to_numpy(continue_error),
         }
 
     def dynamics_loss(self, post_logits, prior_logits):

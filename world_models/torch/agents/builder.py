@@ -62,12 +62,12 @@ def build_sequence_model(cfg, latent_size, action_dim):
             latent_size,
             action_dim,
             cfg.d_model,
-            cfg.act,
             cfg.n_layers,
             cfg.d_state,
             cfg.d_conv,
             cfg.expand,
             cfg.headdim,
+            cfg.act,
         )
     elif cfg.type == "transformer":
         return TransformerSequenceModel(
@@ -107,7 +107,7 @@ def build_prior(cfg, d_model, latent_size):
 
 def build_heads(cfg, in_dim):
     reward_predictor = TwoHotHead(
-        in_dim, cfg.num_bins, cfg.bin_low, cfg.bin_high, cfg.hidden_dim, cfg.n_layers, cfg.act
+        in_dim, cfg.num_bins, cfg.bin_low, cfg.bin_high, cfg.hidden_dim, cfg.n_layers, act=cfg.act
     )
     continue_predictor = BernoulliHead(in_dim, 1, cfg.hidden_dim, cfg.n_layers, cfg.act)
     return reward_predictor, continue_predictor
@@ -130,7 +130,7 @@ def build_objective(cfg, obs_type):
     return CompoundObjective(objectives)
 
 
-def build_world_model(cfg, action_dim):
+def build_world_model(cfg, action_dim) -> WorldModel:
     latent_size = cfg.latent.num_categories * cfg.latent.num_codes
     encoder = build_encoder(cfg.encoder)
     sequence_model = build_sequence_model(cfg.sequence_model, latent_size, action_dim)
@@ -142,9 +142,7 @@ def build_world_model(cfg, action_dim):
     objective = build_objective(cfg, cfg.obs_type)
     head_in_dim = latent_size + d_model if cfg.use_combined_state else d_model
     reward_predictor, continue_predictor = build_heads(cfg.heads, head_in_dim)
-    decoder = (
-        build_decoder(cfg.decoder, encoder.output_size) if objective.requires_decoder else None
-    )
+    decoder = build_decoder(cfg.decoder, encoder.conv_dim) if objective.requires_decoder else None
     return WorldModel(
         encoder,
         sequence_model,
@@ -164,7 +162,7 @@ def build_world_model(cfg, action_dim):
     )
 
 
-def build_actor(cfg, input_dim, action_dim, action_type):
+def build_actor(cfg, input_dim, action_dim, action_type) -> Actor:
     return Actor(
         input_dim,
         action_dim,
@@ -179,7 +177,7 @@ def build_actor(cfg, input_dim, action_dim, action_type):
     )
 
 
-def build_critic(cfg, input_dim):
+def build_critic(cfg, input_dim) -> Critic:
     return Critic(
         input_dim,
         cfg.hidden_dim,

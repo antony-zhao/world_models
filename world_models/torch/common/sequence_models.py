@@ -48,7 +48,9 @@ class SequenceModel(nn.Module, ABC):
             prior_dist.logits[:, :-1],
         )
 
-    def imagine_step(self, latent, action, model_state, prior) -> tuple[Tensor, Tensor, Tensor]:
+    def imagine_step(
+        self, latent, action, model_state, prior
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         # returns next_latent, seq_state, new_model_state
         seq_state, model_state = self.step(
             latent, action, model_state
@@ -167,13 +169,13 @@ class RSSM(SequenceModel):
     def rollout(self, embeddings, actions, posterior, prior, dones=None):
         # returns (latents, states, posterior_dists, prior_dists),
         latents, hiddens, post_logits = self.step_through(embeddings, actions, posterior, dones)
-        prior_logits = prior(hiddens).logits
+        prior_logits = prior(hiddens[:, 1:]).logits
 
         return latents, hiddens, post_logits, prior_logits
 
     def imagine_rollout(
         self, initial_latent, initial_seq, model_state, horizon, actor, prior
-    ) -> tuple[Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         # returns
         # imagined_latents, imagined_seq_states (actor), imagined_sequence_states (heads), actions
         latent, seq_state = initial_latent, initial_seq  # z_0, h_0

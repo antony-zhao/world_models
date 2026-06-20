@@ -67,4 +67,4 @@ class ReconstructionObjective(RepresentationObjective):
         else:
             loss = symlog_squared_error(obs, reconstructions)
 
-        return self.weight * loss, {"loss/reconstruction_loss": loss.item()}
+        return self.weight * loss, {"wm/loss/reconstruction_loss": loss.item()}
