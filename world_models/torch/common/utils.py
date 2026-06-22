@@ -75,16 +75,14 @@ def init_weights(module):
 
 
 def compute_lambda_returns(values, rewards, continues, gamma, lambda_):
-    T = rewards.shape[0]
+    T = rewards.shape[1]
     returns = torch.empty_like(rewards)
-
-    next_return = values[-1]
+    next_return = values[:, -1]
     for t in reversed(range(T)):
-        next_return = rewards[t] + gamma * continues[t] * (
-            (1 - lambda_) * values[t + 1] + lambda_ * next_return
+        next_return = rewards[:, t] + gamma * continues[:, t] * (
+            (1 - lambda_) * values[:, t + 1] + lambda_ * next_return
         )
-        returns[t] = next_return
-
+        returns[:, t] = next_return
     return returns
 
 

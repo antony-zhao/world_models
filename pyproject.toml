@@ -21,6 +21,7 @@ dependencies = [
     # Scientific stack
     "numpy>=1.26",
     "scipy>=1.13.0",
+    "opencv-python>=4.8.0",
 
     # Logging
     "wandb>=0.18.0",

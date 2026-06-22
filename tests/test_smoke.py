@@ -1,64 +1,66 @@
-"""Smoke test: instantiate WM + Actor + Critic via builders, run one of each
-forward+backward, and report what works/fails. Catches integration bugs
-(arg-order mismatches, missing fields, dtype/device issues) before the agent
-training loop adds more layers.
+"""Smoke test: instantiate the full Agent via Agent(cfg), feed the buffer with
+fake transitions, and exercise the entire train_step pipeline end-to-end.
+
+This is the integration test that should run cleanly before launching any real
+training. It exercises:
+
+  1. Agent construction via builders (every component instantiated).
+  2. agent.act() with a fake observation (online inference path).
+  3. agent.add_transition() to populate the buffer.
+  4. agent.train_step() pre-warmup (WM-only training).
+  5. agent.train_step() post-warmup (WM + AC training, including imagine).
+  6. agent.act() after some training (sanity check that online state survives).
 
 Run from the project root:
     python tests/test_smoke.py
-
-This uses SimpleNamespace as a stand-in for OmegaConf — drop in your real cfg
-loader once configs land.
 """
 
 from __future__ import annotations
 
+import traceback
 from types import SimpleNamespace
 
+import numpy as np
 import torch
 from torch import nn
 
-from world_models.torch.agents.builder import build_actor, build_critic, build_world_model
-from world_models.torch.common.sequence_models import RSSM
-from world_models.torch.common.utils import make_state
+from world_models.torch.agents.agent import Agent
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+B_envs = 2  # vectorized env count for the smoke test
 
 
-# ---------------------------------------------------------------- config
+# --------------------------------------------------------------------- config
 
 
-def make_cfg(sequence_model_type: str = "transformer") -> SimpleNamespace:
-    """Build a tiny-but-valid cfg tree. Small dims for fast iteration."""
+def make_cfg(sequence_model_type: str) -> SimpleNamespace:
+    """Minimal but complete cfg tree for Agent."""
     num_cat, num_codes = 8, 8
-    latent_size = num_cat * num_codes  # 64
     d_model = 64
     action_dim = 4
     action_type = "discrete"
-
     obs_shape = (3, 64, 64)
-    image_channels = obs_shape[0]
-    input_size = obs_shape[-1]
+    num_envs = B_envs
 
+    # ----- WM sub-configs
     encoder = SimpleNamespace(
         type="conv",
         filter_base=8,
         num_convs=4,
         kernel_size=4,
-        image_channels=image_channels,
+        image_channels=obs_shape[0],
         obs_shape=obs_shape,
         act=nn.SiLU,
     )
-
     decoder = SimpleNamespace(
         type="conv",
-        in_dim=latent_size,  # STORM-style: decoder takes z_t only
+        in_dim=num_cat * num_codes,
         filter_base=8,
         num_convs=4,
         kernel_size=4,
-        image_channels=image_channels,
+        image_channels=obs_shape[0],
         act=nn.SiLU,
     )
-
     if sequence_model_type == "rssm":
         sequence_model = SimpleNamespace(
             type="rssm",
@@ -111,17 +113,8 @@ def make_cfg(sequence_model_type: str = "transformer") -> SimpleNamespace:
         act=nn.SiLU,
     )
     heads = SimpleNamespace(
-        num_bins=51,
-        bin_low=-20.0,
-        bin_high=20.0,
-        hidden_dim=64,
-        n_layers=2,
-        act=nn.SiLU,
+        num_bins=51, bin_low=-20.0, bin_high=20.0, hidden_dim=64, n_layers=2, act=nn.SiLU
     )
-    objectives = SimpleNamespace(
-        objectives=[SimpleNamespace(name="reconstruction", weight=1.0)],
-    )
-
     wm = SimpleNamespace(
         obs_type="image",
         use_combined_state=False,
@@ -132,7 +125,7 @@ def make_cfg(sequence_model_type: str = "transformer") -> SimpleNamespace:
         posterior=posterior,
         prior=prior,
         heads=heads,
-        objectives=objectives.objectives,  # build_objective reads cfg.objectives as a list
+        objectives=[SimpleNamespace(name="reconstruction", weight=1.0)],
         obj_coef=1.0,
         dyn_coef=0.5,
         repr_coef=0.1,
@@ -140,6 +133,7 @@ def make_cfg(sequence_model_type: str = "transformer") -> SimpleNamespace:
         free_nats=1.0,
     )
 
+    # ----- AC sub-configs
     actor = SimpleNamespace(
         hidden_dim=64,
         num_hiddens=2,
@@ -157,186 +151,208 @@ def make_cfg(sequence_model_type: str = "transformer") -> SimpleNamespace:
         bin_high=20.0,
         act=nn.SiLU,
     )
+    buffer = SimpleNamespace(
+        num_envs=num_envs,
+        buffer_size=1024,
+        prioritized=False,
+    )
+    train = SimpleNamespace(
+        critic_tau=0.02,
+        horizon=4,
+        gamma=0.99,
+        lambda_=0.95,
+        entropy_coef=3e-4,
+        wm_batch_size=4,
+        wm_seq_len=4,
+        ac_batch_size=4,
+        ac_seq_len=4,
+        train_ac_after=20,
+        returns_percentile_lo=0.05,
+        returns_percentile_hi=0.95,
+        returns_ema_tau=0.02,
+        context_window=4,
+    )
+    optim_cfg = SimpleNamespace(
+        wm_lr=1e-4,
+        ac_lr=3e-5,
+        eps=1e-8,
+        wm_clip=1000.0,
+        ac_clip=100.0,
+    )
 
     return SimpleNamespace(
         action_dim=action_dim,
         action_type=action_type,
+        num_envs=num_envs,
+        device=DEVICE,
+        obs_shape=obs_shape,
         wm=wm,
         actor=actor,
         critic=critic,
-        latent_size=latent_size,
-        d_model=d_model,
+        buffer=buffer,
+        train=train,
+        optim=optim_cfg,
     )
 
 
-# ---------------------------------------------------------------- helpers
+# ------------------------------------------------------------------- helpers
 
 
-def make_fake_batch(B: int, T: int, action_dim: int, device: str):
-    """Fake batch matching the WM's expected interface."""
-    obs = (torch.rand(B, T, 3, 64, 64, device=device) * 255).to(torch.uint8)
-    # one-hot actions
-    action_idx = torch.randint(0, action_dim, (B, T), device=device)
-    actions = torch.zeros(B, T, action_dim, device=device)
-    actions.scatter_(-1, action_idx.unsqueeze(-1), 1.0)
-    rewards = torch.randn(B, T, device=device)
-    terminated = torch.zeros(B, T, device=device)
-    # mark one done midway through one sequence to exercise reset path (RSSM)
-    dones = torch.zeros(B, T, device=device)
-    dones[0, T // 2] = 1.0
-    return obs.float(), actions, rewards, terminated, dones
+def fake_obs(cfg):
+    """Random uint8 image obs for env interaction."""
+    return np.random.randint(0, 255, (cfg.num_envs, *cfg.obs_shape), dtype=np.uint8)
 
 
-def build_actor_and_critic(cfg):
-    """Build the real Actor + Critic. Shared across imagine and AC tests so we
-    only construct once and so imagine can call .eval()/.train() on a real
-    nn.Module."""
-    input_dim = cfg.latent_size + cfg.d_model
-    actor = build_actor(cfg.actor, input_dim, cfg.action_dim, cfg.action_type).to(DEVICE)
-    critic = build_critic(cfg.critic, input_dim).to(DEVICE)
-    return actor, critic
+def populate_buffer(agent, cfg, n_steps: int):
+    """Add fake transitions to the buffer by simulating env interaction."""
+    for _ in range(n_steps):
+        obs = fake_obs(cfg).astype(np.float32)
+        action = agent.act(obs)
+        reward = np.random.randn(cfg.num_envs).astype(np.float32)
+        # mark one transition as terminated to exercise the reset path
+        terminated = np.zeros(cfg.num_envs, dtype=bool)
+        if np.random.rand() < 0.1:
+            terminated[0] = True
+        truncated = np.zeros(cfg.num_envs, dtype=bool)
+        agent.add_transition(obs, action, reward, terminated, truncated)
 
 
-# ---------------------------------------------------------------- tests
+# --------------------------------------------------------------------- tests
 
 
-def test_wm_construction_and_loss(cfg, B: int = 2, T: int = 8):
-    """Build WM, run world_model_loss, backward."""
-    print("\n--- test_wm_construction_and_loss ---")
-    wm = build_world_model(cfg.wm, cfg.action_dim).to(DEVICE)
-    print(f"  built {type(wm.sequence_model).__name__}")
+def test_construction(cfg):
+    """Build the agent from cfg. Catches arg-order, missing-field, dtype issues."""
+    print("\n--- test_construction ---")
+    agent = Agent(cfg).to(DEVICE)
+    wm_params = sum(p.numel() for p in agent.world_model.parameters())
+    actor_params = sum(p.numel() for p in agent.actor.parameters())
+    critic_params = sum(p.numel() for p in agent.critic.parameters())
+    print(f"  WM:     {wm_params:>10,} params")
+    print(f"  Actor:  {actor_params:>10,} params")
+    print(f"  Critic: {critic_params:>10,} params")
+    print(f"  is_rssm: {agent.is_rssm}")
+    return agent
 
-    obs, actions, rewards, terminated, dones = make_fake_batch(B, T, cfg.action_dim, DEVICE)
 
-    loss, loss_dict, seq_states_detached, embs_detached = wm.world_model_loss(
-        obs, actions, rewards, terminated, dones
+def test_act_initial(agent, cfg):
+    """Online act on fresh agent (no buffer data, just placeholders)."""
+    print("\n--- test_act_initial ---")
+    obs = fake_obs(cfg).astype(np.float32)
+    action = agent.act(obs)
+    print(f"  action shape: {action.shape}, dtype: {action.dtype}")
+    print(f"  action values: {action.tolist()}")
+    assert action.shape == (cfg.num_envs,), f"expected ({cfg.num_envs},) got {action.shape}"
+
+
+def test_populate_buffer(agent, cfg, n_steps):
+    """Populate buffer by repeatedly acting and adding transitions."""
+    print(f"\n--- test_populate_buffer (n_steps={n_steps}) ---")
+    populate_buffer(agent, cfg, n_steps)
+    print(f"  buffer.size: {agent.buffer.size}")
+    print(f"  agent.step_count: {agent.step_count}")
+    return agent.buffer.size
+
+
+def test_train_step_wm_only(agent, cfg, n_iters=3):
+    """Pre-warmup: only WM training. Should always succeed."""
+    print(f"\n--- test_train_step_wm_only (n_iters={n_iters}) ---")
+    assert agent.step_count <= agent.train_ac_after, (
+        f"step_count={agent.step_count} already exceeds train_ac_after={agent.train_ac_after}, "
+        "AC will run too — adjust the test or buffer-populate count."
     )
-    print(f"  loss = {loss.item():.4f}")
-    print(f"  loss_dict keys: {sorted(loss_dict.keys())}")
-    print(f"  seq_states.shape = {tuple(seq_states_detached.shape)}")
-    print(f"  embeddings.shape = {tuple(embs_detached.shape)}")
-
-    loss.backward()
-    grad_count = sum(1 for p in wm.parameters() if p.grad is not None and p.grad.abs().sum() > 0)
-    total = sum(1 for p in wm.parameters() if p.requires_grad)
-    print(f"  parameters with non-zero grad: {grad_count} / {total}")
-    assert loss.item() == loss.item(), "NaN loss"
-    return wm
+    losses = []
+    for i in range(n_iters):
+        loss, metrics = agent.train_step()
+        losses.append(loss.item())
+        print(f"  iter {i}: wm_loss={loss.item():.4f}, metric_keys={sorted(metrics.keys())}")
+        assert torch.isfinite(loss), f"non-finite loss at iter {i}: {loss}"
+    print(f"  loss progression: {losses}")
 
 
-def test_imagine(cfg, wm, actor, B: int = 2, T_context: int = 8, horizon: int = 4):
-    """Run imagine end-to-end with a real Actor and check return shapes."""
-    print("\n--- test_imagine ---")
-    obs, actions, _, _, dones = make_fake_batch(B, T_context, cfg.action_dim, DEVICE)
+def test_train_step_full(agent, cfg, n_iters=3):
+    """Post-warmup: WM + AC. This is where RSSM-imagine bugs surface."""
+    print(f"\n--- test_train_step_full (n_iters={n_iters}) ---")
+    # Make sure we're past warmup
+    while agent.step_count <= agent.train_ac_after:
+        populate_buffer(agent, cfg, 5)
+    print(f"  step_count={agent.step_count}, train_ac_after={agent.train_ac_after}")
 
-    latents, actor_seqs, head_seqs, imag_actions = wm.imagine(
-        obs, actions, horizon, actor, dones=dones
+    for i in range(n_iters):
+        loss, metrics = agent.train_step()
+        actor_loss = metrics.get("ac/loss/actor")
+        critic_loss = metrics.get("ac/loss/critic")
+        entropy = metrics.get("ac/loss/entropy")
+        adv_mean = metrics.get("ac/stats/advantage_mean")
+        print(
+            f"  iter {i}: wm={loss.item():.3f}  "
+            f"actor={actor_loss:.3f}  critic={critic_loss:.3f}  "
+            f"H={entropy:.3f}  adv_mean={adv_mean:.3f}"
+        )
+        assert torch.isfinite(loss), f"non-finite wm_loss at iter {i}"
+        assert "ac/loss/actor" in metrics, "AC metrics missing — AC didn't run"
+
+
+def test_act_after_training(agent, cfg):
+    """Online act after some training — make sure state isn't corrupted."""
+    print("\n--- test_act_after_training ---")
+    obs = fake_obs(cfg).astype(np.float32)
+    action = agent.act(obs)
+    print(f"  action shape: {action.shape}, values: {action.tolist()}")
+
+
+def test_parameter_updates(agent, cfg):
+    """Confirm parameters actually change across train_steps."""
+    print("\n--- test_parameter_updates ---")
+    wm_params_before = [p.clone() for p in agent.world_model.parameters() if p.requires_grad]
+    populate_buffer(agent, cfg, 10)
+    for _ in range(3):
+        agent.train_step()
+    wm_params_after = list(agent.world_model.parameters())
+    changed = sum(
+        1
+        for b, a in zip(wm_params_before, wm_params_after)
+        if a.requires_grad and not torch.allclose(b, a)
     )
-    print(f"  latents.shape:     {tuple(latents.shape)}")
-    print(f"  actor_seqs.shape:  {tuple(actor_seqs.shape)}")
-    print(f"  head_seqs.shape:   {tuple(head_seqs.shape)}")
-    print(f"  imag_actions.shape:{tuple(imag_actions.shape)}")
-
-    expected_T = horizon + 1
-    assert latents.shape[1] == expected_T, f"latents T={latents.shape[1]} != {expected_T}"
-    assert actor_seqs.shape[1] == expected_T
-    assert head_seqs.shape[1] == expected_T
-    assert imag_actions.shape[1] == expected_T
-    return latents, actor_seqs, head_seqs, imag_actions
+    print(f"  WM params changed: {changed} / {len(wm_params_before)}")
 
 
-def test_actor_critic(cfg, actor, critic, B: int = 2, T: int = 4):
-    """Run forward through Actor/Critic on imagined-like states + backward."""
-    print("\n--- test_actor_critic ---")
-    print(f"  actor: {sum(p.numel() for p in actor.parameters())} params")
-    print(f"  critic: {sum(p.numel() for p in critic.parameters())} params")
-
-    # Fake agent state: [z_t (num_cat * num_codes), seq (d_model)]
-    num_cat = cfg.wm.latent.num_categories
-    num_codes = cfg.wm.latent.num_codes
-    latents = torch.zeros(B, T, num_cat, num_codes, device=DEVICE)
-    latents.scatter_(-1, torch.randint(0, num_codes, (B, T, num_cat, 1), device=DEVICE), 1.0)
-    seq_states = torch.randn(B, T, cfg.d_model, device=DEVICE)
-    states = make_state(latents, seq_states)
-    print(f"  state shape: {tuple(states.shape)}")
-
-    # Actor forward
-    dist = actor.policy_dist(states)
-    action = actor.sample_action(dist)
-    formatted = actor.format_action(action)
-    print(f"  raw action shape: {tuple(action.shape)}")
-    print(f"  formatted (one-hot) action shape: {tuple(formatted.shape)}")
-    log_prob = dist.log_prob(action)
-    entropy = dist.entropy()
-    print(f"  log_prob.shape: {tuple(log_prob.shape)}, entropy.shape: {tuple(entropy.shape)}")
-
-    # Actor backward through a fake objective (does grad flow?)
-    fake_advantage = torch.randn_like(log_prob)
-    actor_loss = -(fake_advantage.detach() * log_prob).mean()
-    actor_loss.backward()
-    actor_grads = sum(
-        1 for p in actor.parameters() if p.grad is not None and p.grad.abs().sum() > 0
-    )
-    print(f"  actor backward OK, params w/ grad: {actor_grads}")
-
-    # Critic forward and backward
-    values, value_logits = critic(states)
-    print(f"  values shape: {tuple(values.shape)}, value_logits shape: {tuple(value_logits.shape)}")
-    fake_targets = torch.randn_like(values)
-    dist = critic.make_dist(value_logits)
-    critic_loss = -dist.log_prob(fake_targets).mean()
-    critic_loss.backward()
-    critic_grads = sum(
-        1 for p in critic.parameters() if p.grad is not None and p.grad.abs().sum() > 0
-    )
-    print(f"  critic backward OK, params w/ grad: {critic_grads}")
+# ------------------------------------------------------------------ main
 
 
-def test_greedy_acting(cfg, actor):
-    """policy_fn(det=True) should not crash for discrete or continuous."""
-    print("\n--- test_greedy_acting ---")
-    input_dim = cfg.latent_size + cfg.d_model
-    state = torch.randn(1, input_dim, device=DEVICE)
+def run_for(seq_type: str):
+    print(f"\n{'=' * 60}\nAGENT SMOKE TEST :: {seq_type.upper()}\n{'=' * 60}")
+    cfg = make_cfg(seq_type)
+    torch.manual_seed(0)
+    np.random.seed(0)
 
-    sampled = actor.policy_fn(state, det=False)
-    greedy = actor.policy_fn(state, det=True)
-    print(f"  sampled action: {sampled.item() if sampled.numel() == 1 else sampled.shape}")
-    print(f"  greedy  action: {greedy.item() if greedy.numel() == 1 else greedy.shape}")
-
-
-# ---------------------------------------------------------------- main
-
-
-def run_for(sequence_model_type: str):
-    print(f"\n{'=' * 60}\nSMOKE TEST :: {sequence_model_type.upper()}\n{'=' * 60}")
-    cfg = make_cfg(sequence_model_type)
-    wm = test_wm_construction_and_loss(cfg)
-    actor, critic = build_actor_and_critic(cfg)
-    test_imagine(cfg, wm, actor)
-    test_actor_critic(cfg, actor, critic)
-    test_greedy_acting(cfg, actor)
-    print(f"\n{sequence_model_type}: all smoke tests passed.")
+    agent = test_construction(cfg)
+    test_act_initial(agent, cfg)
+    test_populate_buffer(agent, cfg, n_steps=10)  # below train_ac_after
+    test_train_step_wm_only(agent, cfg, n_iters=3)
+    test_train_step_full(agent, cfg, n_iters=3)
+    test_act_after_training(agent, cfg)
+    test_parameter_updates(agent, cfg)
+    print(f"\n{seq_type}: all smoke tests passed.")
 
 
 def main():
     print(f"Device: {DEVICE}")
-    for sm_type in ["transformer", "rssm"]:  # add "mamba" if CUDA available
-        try:
-            run_for(sm_type)
-        except Exception as e:
-            print(f"\n{sm_type}: FAILED with {type(e).__name__}: {e}")
-            import traceback
-
-            traceback.print_exc()
-
+    archs = ["transformer", "rssm"]
     if DEVICE == "cuda":
+        archs.append("mamba")
+    results = {}
+    for sm in archs:
         try:
-            run_for("mamba")
+            run_for(sm)
+            results[sm] = "passed"
         except Exception as e:
-            print(f"\nmamba: FAILED with {type(e).__name__}: {e}")
-            import traceback
-
+            print(f"\n{sm}: FAILED with {type(e).__name__}: {e}")
             traceback.print_exc()
+            results[sm] = f"FAILED ({type(e).__name__})"
+
+    print(f"\n{'=' * 60}\nSUMMARY\n{'=' * 60}")
+    for sm, r in results.items():
+        print(f"  {sm:>12s}: {r}")
 
 
 if __name__ == "__main__":

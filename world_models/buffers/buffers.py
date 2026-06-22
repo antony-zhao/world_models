@@ -18,6 +18,7 @@ class ReplayBuffer:
         self.size = 0
         self.done_index = done_index
         self.initialized = False
+        self.weights = None
 
         if buffer_shapes is not None:
             self.init_buffers(buffer_shapes, dtypes)
@@ -44,6 +45,8 @@ class ReplayBuffer:
     def sample_indices(self, batch_size, seq_len=1):
         if self.weights is None:
             if self.size < self.buffer_size:
+                if self.size - seq_len < 0:
+                    raise ValueError(f"buffer size={self.size} < seq_len={seq_len}")
                 indices = np.random.randint(
                     0, min(self.size - seq_len, self.buffer_size), size=batch_size
                 )

@@ -1,0 +1,148 @@
+# Template config for world model RL training on Atari.
+# Run: python -m world_models.torch.agents.train --config configs/atari_template.yaml
+
+# ---------- core
+seed: 0
+device: cuda
+num_envs: 4
+num_eval_envs: 1
+
+env:
+  id: ALE/Pong-v5
+
+# ---- set by train.py from env spaces
+action_dim: null
+action_type: discrete
+obs_shape: null
+
+# ---------- world model
+wm:
+  obs_type: image
+  use_combined_state: false   # STORM/Drama style; flip to true for DreamerV3 baseline
+
+  latent:
+    num_categories: 32
+    num_codes: 32
+
+  encoder:
+    type: conv
+    filter_base: 32
+    num_convs: 4
+    kernel_size: 4
+    image_channels: 3
+    obs_shape: [3, 64, 64]
+    act: ${eval:'__import__("torch").nn.SiLU'}
+
+  decoder:
+    type: conv
+    in_dim: 1024              # = latent.num_categories * latent.num_codes
+    filter_base: 32
+    num_convs: 4
+    kernel_size: 4
+    image_channels: 3
+    act: ${eval:'__import__("torch").nn.SiLU'}
+
+  sequence_model:
+    type: transformer          # rssm | mamba | transformer
+    d_model: 512
+    n_layers: 4
+    num_heads: 8
+    max_seq_len: 1024
+    expand: 4
+    dropout_p: 0.0
+    use_sdpa: true
+    act: ${eval:'__import__("torch").nn.SiLU'}
+
+  posterior:
+    n_layers: 1
+    hidden_dim: 1024
+    num_categories: 32
+    num_codes: 32
+    unimix_prob: 0.01
+    act: ${eval:'__import__("torch").nn.SiLU'}
+
+  prior:
+    n_layers: 1
+    hidden_dim: 1024
+    num_categories: 32
+    num_codes: 32
+    unimix_prob: 0.01
+    act: ${eval:'__import__("torch").nn.SiLU'}
+
+  heads:
+    num_bins: 255
+    bin_low: -20.0
+    bin_high: 20.0
+    hidden_dim: 1024
+    n_layers: 2
+    act: ${eval:'__import__("torch").nn.SiLU'}
+
+  objectives:
+    - name: reconstruction
+      weight: 1.0
+
+  obj_coef: 1.0
+  dyn_coef: 0.5
+  repr_coef: 0.1
+  head_coef: 1.0
+  free_nats: 1.0
+
+# ---------- actor / critic
+actor:
+  hidden_dim: 1024
+  num_hiddens: 3
+  actor_unimix: 0.01
+  log_std_min: -5.0
+  log_std_max: 2.0
+  std_min: 0.1
+  act: ${eval:'__import__("torch").nn.SiLU'}
+
+critic:
+  hidden_dim: 1024
+  num_hiddens: 3
+  num_bins: 255
+  bin_low: -20.0
+  bin_high: 20.0
+  act: ${eval:'__import__("torch").nn.SiLU'}
+
+buffer:
+  num_envs: ${num_envs}
+  buffer_size: 1_000_000
+  prioritized: false
+
+# ---------- optimizer
+optim:
+  wm_lr: 1.0e-4
+  ac_lr: 3.0e-5
+  eps: 1.0e-8
+  wm_clip: 1000.0
+  ac_clip: 100.0
+
+# ---------- training schedule
+train:
+  total_env_steps: 1_000_000
+  prefill_steps: 5_000
+  train_every: 4
+  train_ratio: 1
+  train_ac_after: 200_000
+
+  wm_batch_size: 16
+  wm_seq_len: 64
+  ac_batch_size: 16
+  ac_seq_len: 16
+  context_window: 16
+
+  horizon: 16
+  gamma: 0.997
+  lambda_: 0.95
+  entropy_coef: 3.0e-4
+  critic_tau: 0.02
+  returns_percentile_lo: 0.05
+  returns_percentile_hi: 0.95
+  returns_ema_tau: 0.02
+
+  log_every: 1_000
+  eval_every: 20_000
+  eval_episodes: 5
+  checkpoint_every: 50_000
+  log_dir: ./runs

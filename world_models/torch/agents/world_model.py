@@ -65,7 +65,7 @@ class WorldModel(nn.Module):
             + self.sequence_model.initial_state_from_reference(prev_done) * prev_done
         )
         post_dist = self.posterior(obs_embedding, seq_state)
-        latent = post_dist.mode() if det else post_dist.sample()
+        latent = post_dist.mode if det else post_dist.sample()
 
         return latent, seq_state
 
@@ -77,7 +77,7 @@ class WorldModel(nn.Module):
         transformed_obs = transform_obs(obs_window, self.is_image)
         obs_embedding = self.encoder(transformed_obs)
         post_dist = self.posterior(obs_embedding)
-        latent = post_dist.mode() if det else post_dist.sample()
+        latent = post_dist.mode if det else post_dist.sample()
         seq_state, _ = self.sequence_model.parallel_forward(latent[:, :-1], action_window)
         return latent[:, -1], seq_state[:, -1]
 
@@ -97,7 +97,6 @@ class WorldModel(nn.Module):
         # world model loss/rollout. Don't ever use them for Mamba or Transformer
         self.eval()
         actor.eval()
-        B, T, _ = context_actions.shape
 
         if isinstance(self.sequence_model, RSSM):
             if initial_latent is None or initial_seq is None:
@@ -110,6 +109,7 @@ class WorldModel(nn.Module):
                 initial_seq = seq_states[:, -1]
             model_state = initial_seq
         else:
+            B, T, _ = context_actions.shape
             transformed = transform_obs(context_obs, self.is_image)
             embeddings = self.encoder(transformed)
             latents = self.posterior(embeddings).sample()
@@ -143,13 +143,15 @@ class WorldModel(nn.Module):
                 reconstructions = self.decoder(states)
         else:
             if latents.ndim > seq_states.ndim:
-                latents = latents.flatten(-2)
+                decoder_latents = latents.flatten(-2)
+            else:
+                decoder_latents = latents
             continue_dist = self.continue_predictor(seq_states)
             reward_twohot = self.reward_predictor(seq_states)
             if self.decoder is None:
                 reconstructions = None
             else:
-                reconstructions = self.decoder(latents)
+                reconstructions = self.decoder(decoder_latents)
         context = {
             "obs": transformed_obs,
             "reconstructions": reconstructions,
@@ -175,7 +177,7 @@ class WorldModel(nn.Module):
             + dyn_loss * self.dyn_coef
             + repr_loss * self.repr_coef
         )
-        loss_dict["loss/KL_div"] = to_numpy(dyn_loss)
+        loss_dict["wm/loss/KL_div"] = to_numpy(dyn_loss)
         loss_dict = loss_dict | head_loss_dict
         return (
             loss,

@@ -1,0 +1,159 @@
+# Atari100k config — STORM-style hyperparameters.
+# Total budget: 100,000 env steps (= 400,000 raw frames after frame_skip=4).
+#
+# Run: python -m world_models.torch.agents.train --config configs/atari100k.yaml
+#
+# Notes:
+# - Sizes are STORM-scale (smaller than full Atari DreamerV3 config).
+# - train_ratio is bumped up substantially to compensate for the 100k data budget.
+# - train_ac_after is shorter; the agent needs to actually use most of its budget on AC.
+# - prefill_steps is small to leave more steps for actual training.
+
+# ---------- core
+seed: 0
+device: cuda
+num_envs: 1                   # STORM/DreamerV3 Atari100k uses single env
+num_eval_envs: 1
+
+env:
+  id: ALE/Pong-v5             # any Atari game; see ale-py for the list
+
+# ---- set by train.py from env spaces
+action_dim: null
+action_type: discrete
+obs_shape: null
+
+# ---------- world model
+wm:
+  obs_type: image
+  use_combined_state: false   # STORM style (heads on d_t only)
+
+  latent:
+    num_categories: 32
+    num_codes: 32
+
+  encoder:
+    type: conv
+    filter_base: 32
+    num_convs: 4
+    kernel_size: 4
+    image_channels: 3
+    obs_shape: [3, 64, 64]
+    act: ${eval:'__import__("torch").nn.SiLU'}
+
+  decoder:
+    type: conv
+    in_dim: 1024
+    filter_base: 32
+    num_convs: 4
+    kernel_size: 4
+    image_channels: 3
+    act: ${eval:'__import__("torch").nn.SiLU'}
+
+  sequence_model:
+    type: transformer
+    d_model: 512              # STORM uses 256
+    n_layers: 2               # STORM uses 2 layers
+    num_heads: 8
+    max_seq_len: 256
+    expand: 4
+    dropout_p: 0.1            # STORM uses dropout=0.1
+    use_sdpa: true
+    act: ${eval:'__import__("torch").nn.SiLU'}
+
+  posterior:
+    n_layers: 1
+    hidden_dim: 1024
+    num_categories: 32
+    num_codes: 32
+    unimix_prob: 0.01
+    act: ${eval:'__import__("torch").nn.SiLU'}
+
+  prior:
+    n_layers: 1
+    hidden_dim: 1024
+    num_categories: 32
+    num_codes: 32
+    unimix_prob: 0.01
+    act: ${eval:'__import__("torch").nn.SiLU'}
+
+  heads:
+    num_bins: 255
+    bin_low: -20.0
+    bin_high: 20.0
+    hidden_dim: 1024
+    n_layers: 2
+    act: ${eval:'__import__("torch").nn.SiLU'}
+
+  objectives:
+    - name: reconstruction
+      weight: 1.0
+
+  obj_coef: 1.0
+  dyn_coef: 0.5
+  repr_coef: 0.1
+  head_coef: 1.0
+  free_nats: 1.0
+
+# ---------- actor / critic
+actor:
+  hidden_dim: 1024
+  num_hiddens: 2
+  actor_unimix: 0.01
+  log_std_min: -5.0
+  log_std_max: 2.0
+  std_min: 0.1
+  act: ${eval:'__import__("torch").nn.SiLU'}
+
+critic:
+  hidden_dim: 1024
+  num_hiddens: 2
+  num_bins: 255
+  bin_low: -20.0
+  bin_high: 20.0
+  act: ${eval:'__import__("torch").nn.SiLU'}
+
+buffer:
+  num_envs: ${num_envs}
+  buffer_size: 200_000        # only need 2× the env budget
+  prioritized: false
+
+# ---------- optimizer
+optim:
+  wm_lr: 1.0e-4
+  ac_lr: 3.0e-5
+  eps: 1.0e-8
+  wm_clip: 1000.0
+  ac_clip: 100.0
+
+# ---------- training schedule
+train:
+  total_env_steps: 100_000    # Atari100k standard
+  prefill_steps: 1_000        # short — leaves room for actual training
+  train_every: 1              # train every env step
+  train_ratio: 1              # 1 train_step per env step (effective ratio = 1)
+                              # bump to 4 or 8 if convergence is too slow,
+                              # 16+ for DreamerV3-style "data efficient"
+  train_ac_after: 5_000       # short AC warmup; 5k = 5% of budget
+
+  wm_batch_size: 16
+  wm_seq_len: 64              # STORM uses 64
+  ac_batch_size: 1024
+  ac_seq_len: 8               # STORM imagine_context=8
+  context_window: 16           # non-RSSM online deque
+
+  horizon: 16                 # STORM imagine_batch_length=16
+  gamma: 0.985                # STORM uses 0.985 for Atari100k (not 0.997)
+  lambda_: 0.95
+  entropy_coef: 3.0e-4
+  critic_tau: 0.02
+  returns_percentile_lo: 0.05
+  returns_percentile_hi: 0.95
+  returns_ema_tau: 0.02
+
+  # logging / eval / checkpoint
+  log_every: 500
+  eval_every: 5_000
+  eval_episodes: 10
+  checkpoint_every: 25_000
+  log_dir: ./runs

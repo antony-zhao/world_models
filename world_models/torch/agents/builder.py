@@ -1,8 +1,8 @@
 from world_models.buffers.buffers import PerEnvBuffer
 from world_models.torch.agents.actor_critic import Actor, Critic
 from world_models.torch.agents.world_model import WorldModel
-from world_models.torch.common.decoders import ConvDecoder, VectorDecoder
-from world_models.torch.common.encoders import ConvEncoder, MultiEncoder, VectorEncoder
+from world_models.torch.common.decoders import ConvDecoder
+from world_models.torch.common.encoders import ConvEncoder
 from world_models.torch.common.heads import BernoulliHead, CategoricalHead, TwoHotHead
 from world_models.torch.common.models import Posterior, Prior
 from world_models.torch.common.objectives import CompoundObjective, ReconstructionObjective
@@ -194,4 +194,6 @@ def build_buffer(cfg):
         # need to add sumtree weight in somewhere, probably owned by the agent
         # since there should be separate weights for world model and for actor-critic
         raise NotImplementedError
-    return PerEnvBuffer(cfg.num_envs, cfg.buffer_size)  # buffer has lazy init for first sample
+    return PerEnvBuffer(
+        cfg.num_envs, buffer_size=cfg.buffer_size
+    )  # buffer has lazy init for first sample
