@@ -54,6 +54,19 @@ class TwoHotHead(nn.Module):
     def make_dist_from_logits(self, logits):
         return TwoHotEncoding(self.bins, logits, self.to_value, self.to_bin)
 
+    def zero_init(self):
+        if isinstance(self.proj.layers, nn.Linear):
+            nn.init.zeros_(self.proj.layers.weight)
+            if self.proj.layers.bias is not None:
+                nn.init.zeros_(self.proj.layers.bias)
+        else:
+            for module in reversed(list(self.proj.layers)):
+                if isinstance(module, nn.Linear):
+                    nn.init.zeros_(module.weight)
+                    if module.bias is not None:
+                        nn.init.zeros_(module.bias)
+                    break
+
 
 class BernoulliHead(nn.Module):
     def __init__(self, in_dim, out_dim=1, hidden_dim=256, n_layers=2, act=nn.SiLU):

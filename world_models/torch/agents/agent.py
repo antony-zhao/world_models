@@ -85,7 +85,7 @@ class Agent(nn.Module):
             latent, seq_state = self.world_model.step_obs_rssm(
                 obs_tensor, self.prev_action, self.prev_latent, done_tensor, self.model_state, det
             )
-            self.prev_latent = latent
+            self.prev_latent = latent.detach()
             self.model_state = seq_state.detach()
         else:
             self.obs_history.append(torch.from_numpy(obs).float().to(self.device))
@@ -131,7 +131,7 @@ class Agent(nn.Module):
                 self.eval_model_state,
                 det,
             )
-            self.eval_latent = latent
+            self.eval_latent = latent.detach()
             self.eval_model_state = seq_state.detach()
         else:
             self.eval_obs.append(torch.from_numpy(obs).float().to(self.device))
@@ -183,6 +183,19 @@ class Agent(nn.Module):
         wm_loss, wm_loss_dict, latents, seq_states = self.world_model.world_model_loss(
             obs, actions, rewards, terminated, dones
         )
+        if self.step_count < 50:
+            print(f"step {self.step_count}: total={wm_loss.item():.4f}, dict={wm_loss_dict}")
+            print(f"  decoder is None: {self.world_model.decoder is None}")
+            print(
+                f"  obj_coef={self.world_model.obj_coef}, "
+                f"dyn_coef={self.world_model.dyn_coef}, "
+                f"repr_coef={self.world_model.repr_coef}"
+            )
+            # check decoder is getting gradient
+            for n, p in self.world_model.decoder.named_parameters():
+                if p.grad is not None:
+                    print(f"  decoder {n}: grad_norm={p.grad.norm().item():.4f}")
+                break
         self.optim_wm.zero_grad(set_to_none=True)
         wm_loss.backward()
         nn.utils.clip_grad_norm_(self.world_model.parameters(), self.wm_clip)
@@ -206,28 +219,37 @@ class Agent(nn.Module):
         head_state = (
             make_state(latents, head_seq) if self.world_model.use_combined_state else head_seq
         )
-        reward_pred = self.world_model.reward_predictor(head_state).mean()
-        continue_pred = self.world_model.continue_predictor(head_state).mean.squeeze(-1)
-        actor_state = make_state(latents, actor_seq)
+        reward_pred = self.world_model.reward_predictor(head_state).mean().detach()
+        continue_pred = self.world_model.continue_predictor(head_state).mean.squeeze(-1).detach()
+        actor_state = make_state(latents, actor_seq).detach()
         values, value_logits = self.critic(actor_state)
         value_targets, _ = self.critic_target(actor_state)
-        value_targets = value_targets.detach()
         returns = compute_lambda_returns(
             values.detach(), reward_pred[:, :-1], continue_pred[:, :-1], self.gamma, self.lambda_
         )
-        action_dist = self.actor.policy_dist(actor_state)
+        returns_targets = compute_lambda_returns(
+            value_targets.detach(),
+            reward_pred[:, :-1],
+            continue_pred[:, :-1],
+            self.gamma,
+            self.lambda_,
+        )
+        action_dist = self.actor.policy_dist(actor_state[:, :-1])
         adv = returns - values.detach()[:, :-1]
         adv = self._normalize_advantages(returns, adv)
         if self.action_type == "discrete":
             actions = actions.argmax(-1)
-        actor_loss = (
-            -(adv.detach() * action_dist.log_prob(actions)[:, :-1]).mean()
-            - self.entropy_coef * action_dist.entropy().mean()
-        )
+        log_probs = action_dist.log_prob(actions)
+        entropy = action_dist.entropy()
+        if log_probs.dim() > adv.dim():
+            log_probs = log_probs.sum(-1)
+            entropy = entropy.sum(-1)
+        actor_loss = -(adv * log_probs + self.entropy_coef * entropy).mean()
         critic_loss = (
-            -self.critic.make_dist(value_logits).log_prob(value_targets).mean()
-            - self.critic.make_dist(value_logits[:, :-1]).log_prob(returns.detach()).mean()
-        )
+            # -self.critic.make_dist(value_logits).log_prob(value_targets.detach()).mean()
+            -self.critic.make_dist(value_logits[:, :-1]).log_prob(returns_targets.detach())
+            - self.critic.make_dist(value_logits[:, :-1]).log_prob(returns.detach())
+        ).mean()
         self.optim_critic.zero_grad(set_to_none=True)
         critic_loss.backward()
         nn.utils.clip_grad_norm_(self.critic.parameters(), self.ac_clip)
@@ -256,9 +278,9 @@ class Agent(nn.Module):
             self.returns_range_ema = range_
         else:
             tau = self.returns_ema_tau
-            self.returns_range_ema = tau * range_ + (1 - tau) * self.returns_range_ema
+            self.returns_range_ema = (tau * range_ + (1 - tau) * self.returns_range_ema).detach()
         scale = torch.clamp(self.returns_range_ema, min=1.0)
-        return advantages / scale
+        return (advantages / scale).detach()
 
     def _actions_to_model_input(self, actions):
         if self.action_type == "discrete":

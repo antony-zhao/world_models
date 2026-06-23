@@ -87,6 +87,7 @@ class Critic(nn.Module):
         super().__init__()
         self.mlp = MLP(input_dim, hidden_dim, hidden_dim, num_hiddens - 1, act)
         self.twohot = TwoHotHead(hidden_dim, num_bins, bin_low, bin_high, hidden_dim, None)
+        # self.twohot.zero_init()
 
     def forward(self, x):
         logits = self.mlp(x)

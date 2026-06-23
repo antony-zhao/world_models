@@ -48,6 +48,7 @@ class WorldModel(nn.Module):
     def initial_state(self, batch_size, device):
         return self.sequence_model.initial_state(batch_size, device)
 
+    @torch.no_grad()
     def step_obs_rssm(self, obs, prev_action, prev_latent, prev_done, model_state, det=False):
         # action should be preprocessed into one_hot before being passed here
         # takes in x_t, a_{t-1}, z_{t-1}
@@ -69,6 +70,7 @@ class WorldModel(nn.Module):
 
         return latent, seq_state
 
+    @torch.no_grad()
     def step_obs_window(self, obs_window, action_window, det=False):
         # Passes in a sequence of obs (o_{t-l}-o_t)
         # and actions (a_{t-l}-a_{t-1})

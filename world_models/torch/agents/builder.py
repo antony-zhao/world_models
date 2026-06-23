@@ -110,6 +110,7 @@ def build_heads(cfg, in_dim):
         in_dim, cfg.num_bins, cfg.bin_low, cfg.bin_high, cfg.hidden_dim, cfg.n_layers, act=cfg.act
     )
     continue_predictor = BernoulliHead(in_dim, 1, cfg.hidden_dim, cfg.n_layers, cfg.act)
+    # reward_predictor.zero_init()
     return reward_predictor, continue_predictor
 
 
