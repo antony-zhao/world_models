@@ -16,7 +16,7 @@ num_envs: 1                   # STORM/DreamerV3 Atari100k uses single env
 num_eval_envs: 1
 
 env:
-  id: ALE/Pong-v5             # any Atari game; see ale-py for the list
+  game: ALE/Pong-v5
 
 # ---- set by train.py from env spaces
 action_dim: null
@@ -122,7 +122,7 @@ buffer:
 optim:
   wm_lr: 1.0e-4
   ac_lr: 3.0e-5
-  eps: 1.0e-5
+  eps: 1.0e-8
   wm_clip: 1000.0
   ac_clip: 100.0
 
@@ -152,7 +152,7 @@ train:
   returns_ema_tau: 0.02
 
   # logging / eval / checkpoint
-  log_every: 500
+  log_every: 100
   eval_every: 5_000
   eval_episodes: 10
   checkpoint_every: 25_000

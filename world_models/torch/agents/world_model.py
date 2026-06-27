@@ -171,7 +171,7 @@ class WorldModel(nn.Module):
             rewards, reward_twohot, terminated, continue_dist
         )
 
-        dyn_loss = self.dynamics_loss(post_logits, prior_logits)
+        dyn_loss, unclipped_kl = self.dynamics_loss(post_logits, prior_logits)
         repr_loss = self.representation_loss(post_logits, prior_logits)
         loss = (
             obj_loss * self.obj_coef
@@ -180,6 +180,7 @@ class WorldModel(nn.Module):
             + repr_loss * self.repr_coef
         )
         loss_dict["wm/loss/KL_div"] = to_numpy(dyn_loss)
+        loss_dict["wm/loss/unclipped_KL"] = to_numpy(unclipped_kl)
         loss_dict = loss_dict | head_loss_dict
         return (
             loss,
@@ -201,7 +202,7 @@ class WorldModel(nn.Module):
         latent_post = Independent(OneHotCategoricalStraightThrough(logits=post_logits.detach()), 1)
         latent_prior = Independent(OneHotCategoricalStraightThrough(logits=prior_logits), 1)
         kl_div = kl_divergence(latent_post, latent_prior)
-        return torch.clip(kl_div, min=self.free_nats).mean()
+        return torch.clip(kl_div, min=self.free_nats).mean(), kl_div.mean()
 
     def representation_loss(self, post_logits, prior_logits):
         latent_post = Independent(OneHotCategoricalStraightThrough(logits=post_logits), 1)

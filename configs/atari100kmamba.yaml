@@ -16,7 +16,7 @@ num_envs: 1                   # STORM/DreamerV3 Atari100k uses single env
 num_eval_envs: 1
 
 env:
-  id: ALE/Pong-v5             # any Atari game; see ale-py for the list
+  game: ALE/Pong-v5
 
 # ---- set by train.py from env spaces
 action_dim: null

@@ -13,10 +13,10 @@
 seed: 0
 device: cuda
 num_envs: 1                   # STORM/DreamerV3 Atari100k uses single env
-num_eval_envs: 1
+num_eval_envs: 5
 
 env:
-  id: ALE/Pong-v5             # any Atari game; see ale-py for the list
+  game: ALE/Pong-v5
 
 # ---- set by train.py from env spaces
 action_dim: null
@@ -122,19 +122,19 @@ buffer:
 optim:
   wm_lr: 1.0e-4
   ac_lr: 3.0e-5
-  eps: 1.0e-5
+  eps: 1.0e-8
   wm_clip: 1000.0
   ac_clip: 100.0
 
 # ---------- training schedule
 train:
-  total_env_steps: 20_000    # Atari100k standard
+  total_env_steps: 100_000    # Atari100k standard
   prefill_steps: 1_000        # short — leaves room for actual training
   train_every: 1              # train every env step
   train_ratio: 1              # 1 train_step per env step (effective ratio = 1)
                               # bump to 4 or 8 if convergence is too slow,
                               # 16+ for DreamerV3-style "data efficient"
-  train_ac_after: 10_000       # short AC warmup; 5k = 5% of budget
+  train_ac_after: 5_000       # short AC warmup; 5k = 5% of budget
 
   wm_batch_size: 16
   wm_seq_len: 64              # STORM uses 64

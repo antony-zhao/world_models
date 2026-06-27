@@ -13,7 +13,7 @@ set -euo pipefail
 
 # ---------- defaults ----------
 CONFIG="${CONFIG:-configs/atari100k.yaml}"
-GAMES="${GAMES:-Pong Boxing Breakout}"
+GAMES="${GAMES:-pong boxing breakout}"
 SEEDS="${SEEDS:-1}"
 LOG_ROOT="${LOG_ROOT:-./runs/sweep_$(date +%Y%m%d-%H%M%S)}"
 PYTHON="${PYTHON:-python}"
@@ -53,7 +53,7 @@ for game in $GAMES; do
     # tee stdout/stderr to a log file, also keep on screen
     $PYTHON -m world_models.torch.agents.train \
       --config "$CONFIG" \
-      env.id="ALE/${game}-v5" \
+      env.game="$game" \
       seed="$seed" \
       train.log_dir="$LOG_ROOT" \
       2>&1 | tee "${run_dir}/train.log"
