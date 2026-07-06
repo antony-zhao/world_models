@@ -92,7 +92,6 @@ class Agent(nn.Module):
             self.obs_history.append(torch.from_numpy(obs).float().to(self.device))
             obs_tensor = torch.stack(list(self.obs_history), 1)
             action_tensor = torch.stack(list(self.action_history), 1)
-            # action_tensor = self._actions_to_model_input(action_tensor)
             latent, seq_state = self.world_model.step_obs_window(obs_tensor, action_tensor, det=det)
         state = make_state(latent, seq_state)
         action = self.actor.policy_fn(state, det)
@@ -218,13 +217,6 @@ class Agent(nn.Module):
         returns = compute_lambda_returns(
             values.detach(), reward_pred[:, :-1], continue_pred[:, :-1], self.gamma, self.lambda_
         )
-        # returns_targets = compute_lambda_returns(
-        #     value_targets.detach(),
-        #     reward_pred[:, :-1],
-        #     continue_pred[:, :-1],
-        #     self.gamma,
-        #     self.lambda_,
-        # )
         action_dist = self.actor.policy_dist(actor_state[:, :-1])
         adv = returns - values.detach()[:, :-1]
         adv = self._normalize_advantages(returns, adv)
@@ -238,7 +230,6 @@ class Agent(nn.Module):
         actor_loss = -(adv * log_probs + self.entropy_coef * entropy).mean()
         critic_loss = (
             -self.critic.make_dist(value_logits).log_prob(value_targets.detach()).mean()
-            # -self.critic.make_dist(value_logits[:, :-1]).log_prob(returns_targets.detach())
             - self.critic.make_dist(value_logits[:, :-1]).log_prob(returns.detach())
         ).mean()
         self.optim_critic.zero_grad(set_to_none=True)

@@ -68,7 +68,6 @@ def make_env_fn(env_id: str, seed: int, full_action_space: bool = False):
             lambda obs: np.transpose(obs, (2, 0, 1)),
             observation_space=gym.spaces.Box(low=0, high=255, shape=(3, 64, 64), dtype=np.uint8),
         )
-        env = LifeLossInfo(env)
         env.action_space.seed(seed)
         return env
 
@@ -78,11 +77,9 @@ def make_env_fn(env_id: str, seed: int, full_action_space: bool = False):
 def build_envs(cfg):
     train_envs = gym.vector.AsyncVectorEnv(
         [make_env_fn(cfg.env.game, cfg.seed + i) for i in range(cfg.num_envs)],
-        autoreset_mode=gym.vector.AutoresetMode.SAME_STEP,
     )
     eval_envs = gym.vector.AsyncVectorEnv(
         [make_env_fn(cfg.env.game, cfg.seed + 10000 + i) for i in range(cfg.num_eval_envs)],
-        autoreset_mode=gym.vector.AutoresetMode.SAME_STEP,
     )
     return train_envs, eval_envs
 
@@ -118,7 +115,6 @@ def evaluate(agent, env, num_episodes):
                 lengths_buffer.append(int(ep_lengths[i]))
             ep_returns[i] = 0
             ep_lengths[i] = 0
-
     return float(np.mean(returns_buffer)), float(np.mean(lengths_buffer))
 
 
@@ -265,9 +261,10 @@ def main(cfg_path: str, overrides: list[str] = None):
             logger.add_scalar("eval/episode_return", eval_return)
             logger.add_scalar("eval/episode_length", eval_length)
             logger.write(env_step)
+            train_return = np.mean(completed_returns[-100:]) if completed_returns else 0
             print(
                 f"  step {env_step:>9,}  "
-                f"train_return={np.mean(completed_returns[-100:]) if completed_returns else 0:7.2f}  "
+                f"train_return={train_return:7.2f}  "
                 f"eval_return={eval_return:7.2f}"
             )
 

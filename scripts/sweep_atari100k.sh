@@ -13,7 +13,7 @@ set -euo pipefail
 
 # ---------- defaults ----------
 CONFIG="${CONFIG:-configs/atari100k.yaml}"
-GAMES="${GAMES:-pong boxing breakout}"
+GAMES="${GAMES:-ALE/Breakout-v5 ALE/Pong-v5}"
 SEEDS="${SEEDS:-1}"
 LOG_ROOT="${LOG_ROOT:-./runs/sweep_$(date +%Y%m%d-%H%M%S)}"
 PYTHON="${PYTHON:-python}"

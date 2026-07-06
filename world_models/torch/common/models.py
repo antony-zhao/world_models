@@ -22,8 +22,8 @@ class SkipLinear(nn.Module):
 class MLP(nn.Module):
     """
     Simple MLP class, main thing to note is if
-    n_layers is None it defaults to a single linear layer
-    n_layers == 1, it's an input and output linear (simplest MLP)
+    num_hiddens is None it defaults to a single linear layer
+    num_hiddens == 0, it's an input and output linear (simplest MLP)
     """
 
     def __init__(
@@ -31,28 +31,28 @@ class MLP(nn.Module):
         input_dim,
         output_dim,
         hidden_dim=256,
-        n_layers=2,
+        num_hiddens=2,
         act=nn.SiLU,
         norm=True,
         final_act=None,
         skip_connections=False,
     ):
         super().__init__()
-        if n_layers is None:
+        if num_hiddens is None:
             self.layers = nn.Linear(input_dim, output_dim)
             return
 
         def norm_act():
             parts = []
             if norm:
-                parts.append(nn.RMSNorm(hidden_dim, eps=1e-6))
+                parts.append(nn.LayerNorm(hidden_dim, eps=1e-6))
             parts.append(act())
             return parts
 
         layers = [nn.Linear(input_dim, hidden_dim, bias=not norm)]
         layers.extend(norm_act())
 
-        for _ in range(n_layers):
+        for _ in range(num_hiddens):
             if skip_connections:
                 layers.append(SkipLinear(hidden_dim, bias=not norm))
             else:
@@ -124,7 +124,7 @@ class IMPALACNN(nn.Module):
 class ChannelNorm(nn.Module):
     def __init__(self, num_channels, eps=1e-6):
         super().__init__()
-        self.norm = nn.RMSNorm(num_channels, eps)
+        self.norm = nn.LayerNorm(num_channels, eps)
 
     def forward(self, x):
         x = x.permute(0, 2, 3, 1)
@@ -171,7 +171,7 @@ class Posterior(nn.Module):
         out_dim,
         dist_head,
         d_model=None,
-        n_layers=2,
+        num_hiddens=2,
         hidden_dim=256,
         act=nn.SiLU,
         includes_sequence_state=False,
@@ -182,7 +182,7 @@ class Posterior(nn.Module):
             in_dim = embed_dim + d_model
         else:
             in_dim = embed_dim
-        self.proj = MLP(in_dim, out_dim, hidden_dim, n_layers)
+        self.proj = MLP(in_dim, out_dim, hidden_dim, num_hiddens)
         self.dist_head = dist_head
         self.includes_sequence_state = includes_sequence_state
 
@@ -196,9 +196,9 @@ class Posterior(nn.Module):
 
 
 class Prior(nn.Module):
-    def __init__(self, d_model, out_dim, dist_head, n_layers=2, hidden_dim=256, act=nn.SiLU):
+    def __init__(self, d_model, out_dim, dist_head, num_hiddens=2, hidden_dim=256, act=nn.SiLU):
         super().__init__()
-        self.proj = MLP(d_model, out_dim, hidden_dim, n_layers)
+        self.proj = MLP(d_model, out_dim, hidden_dim, num_hiddens)
         self.dist_head = dist_head
 
     def forward(self, sequence_state):
@@ -290,7 +290,7 @@ class MambaBlock(nn.Module):
         headdim=64,
     ):
         super().__init__()
-        self.norm = nn.RMSNorm(d_model)
+        self.norm = nn.LayerNorm(d_model)
         self.mamba = Mamba2(
             d_model=d_model,
             d_state=d_state,
@@ -404,11 +404,11 @@ class TransformerBlock(nn.Module):
         self.dropout = dropout
         self.causal = is_causal
 
-        self.rms1 = nn.RMSNorm(d_model)
+        self.rms1 = nn.LayerNorm(d_model)
         self.qkv = nn.Linear(d_model, d_model * 3, bias=False)
         self.out_proj = nn.Linear(d_model, d_model, bias=False)
 
-        self.rms2 = nn.RMSNorm(d_model)
+        self.rms2 = nn.LayerNorm(d_model)
         self.ff = TransformerFFNetwork(d_model, expand, dropout, act)
 
         self.rope = RotaryEmbedding(self.head_dim, max_seq_len=max_seq_len)
@@ -421,20 +421,15 @@ class TransformerBlock(nn.Module):
         return (cache_k, cache_v)
 
     @staticmethod
-    def _manual_attention(q, k, v, is_causal=False):
-        """Manual scaled dot-product attention. Works for any T.
-
-        q: (B, H, T_q, D), k, v: (B, H, T_k, D)
-        Returns: (B, H, T_q, D)
-        """
+    def _manual_attention(q, k, v, is_causal=False, seq_offset=0):
         scale = q.shape[-1] ** -0.5
         scores = torch.matmul(q, k.transpose(-2, -1)) * scale
         if is_causal:
             T_q, T_k = q.shape[-2], k.shape[-2]
-            mask = torch.triu(
-                torch.ones(T_q, T_k, device=q.device, dtype=torch.bool),
-                diagonal=1,
-            )
+            # absolute query positions vs absolute key positions
+            qpos = torch.arange(T_q, device=q.device) + seq_offset
+            kpos = torch.arange(T_k, device=q.device)
+            mask = kpos[None, :] > qpos[:, None]  # True = disallowed
             scores = scores.masked_fill(mask, float("-inf"))
         attn = F.softmax(scores, dim=-1)
         return torch.matmul(attn, v)
@@ -470,19 +465,32 @@ class TransformerBlock(nn.Module):
             new_cache = None
 
         if T > 1 and self.use_sdpa:
-            is_causal = self.causal
-            attn = F.scaled_dot_product_attention(
-                q,
-                k_full,
-                v_full,
-                is_causal=is_causal,
-                dropout_p=self.dropout if self.training else 0.0,
-            )
+            if cache is not None and seq_offset > 0:
+                # rectangular causal mask; can't use is_causal=True here
+                T_k = k_full.shape[-2]
+                qpos = torch.arange(T, device=q.device) + seq_offset
+                kpos = torch.arange(T_k, device=q.device)
+                attn_mask = kpos[None, :] <= qpos[:, None]  # True = allowed (bool mask)
+                attn = F.scaled_dot_product_attention(
+                    q,
+                    k_full,
+                    v_full,
+                    attn_mask=attn_mask,
+                    dropout_p=self.dropout if self.training else 0.0,
+                )
+            else:
+                attn = F.scaled_dot_product_attention(
+                    q,
+                    k_full,
+                    v_full,
+                    is_causal=self.causal,
+                    dropout_p=self.dropout if self.training else 0.0,
+                )
         else:
-            # Step mode never needs causal mask (single query attends to all keys).
-            # Parallel mode needs the causal mask.
             is_causal = self.causal and T > 1
-            attn = self._manual_attention(q, k_full, v_full, is_causal=is_causal)
+            attn = self._manual_attention(
+                q, k_full, v_full, is_causal=is_causal, seq_offset=seq_offset
+            )
         attn = attn.transpose(1, 2).contiguous().view(B, T, self.d_model)
         attn = self.out_proj(attn)
         x = x + attn

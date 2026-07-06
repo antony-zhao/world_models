@@ -4,7 +4,7 @@ from torch.distributions import Bernoulli, Distribution, Independent
 
 from world_models.torch.common.distributions import DiscreteLatentDist, TwoHotEncoding
 from world_models.torch.common.models import MLP
-from world_models.torch.common.utils import symexp, symlog, unimix
+from world_models.torch.common.utils import init_last_layer, symexp, symlog, unimix
 
 
 class CategoricalHead(nn.Module):
@@ -35,7 +35,7 @@ class TwoHotHead(nn.Module):
         bin_low,
         bin_high,
         hidden_dim=256,
-        n_layers=2,
+        num_hiddens=2,
         to_value=symexp,
         to_bin=symlog,
         act=nn.SiLU,
@@ -43,7 +43,7 @@ class TwoHotHead(nn.Module):
         super().__init__()
         bins = torch.linspace(bin_low, bin_high, num_bins)
         self.register_buffer("bins", bins)
-        self.proj = MLP(in_dim, num_bins, hidden_dim, n_layers, act)
+        self.proj = MLP(in_dim, num_bins, hidden_dim, num_hiddens, act)
         self.to_value = to_value
         self.to_bin = to_bin
 
@@ -55,23 +55,13 @@ class TwoHotHead(nn.Module):
         return TwoHotEncoding(self.bins, logits, self.to_value, self.to_bin)
 
     def zero_init(self):
-        if isinstance(self.proj.layers, nn.Linear):
-            nn.init.zeros_(self.proj.layers.weight)
-            if self.proj.layers.bias is not None:
-                nn.init.zeros_(self.proj.layers.bias)
-        else:
-            for module in reversed(list(self.proj.layers)):
-                if isinstance(module, nn.Linear):
-                    nn.init.zeros_(module.weight)
-                    if module.bias is not None:
-                        nn.init.zeros_(module.bias)
-                    break
+        init_last_layer(self.proj, nn.init.zeros_)
 
 
 class BernoulliHead(nn.Module):
-    def __init__(self, in_dim, out_dim=1, hidden_dim=256, n_layers=2, act=nn.SiLU):
+    def __init__(self, in_dim, out_dim=1, hidden_dim=256, num_hiddens=2, act=nn.SiLU):
         super().__init__()
-        self.proj = MLP(in_dim, out_dim, hidden_dim, n_layers, act)
+        self.proj = MLP(in_dim, out_dim, hidden_dim, num_hiddens, act)
 
     def forward(self, x) -> Distribution:
         logits = self.proj(x)

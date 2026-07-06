@@ -10,7 +10,7 @@
 # - prefill_steps is small to leave more steps for actual training.
 
 # ---------- core
-seed: 0
+seed: 1
 device: cuda
 num_envs: 1                   # STORM/DreamerV3 Atari100k uses single env
 num_eval_envs: 5
@@ -62,7 +62,7 @@ wm:
     act: ${eval:'__import__("torch").nn.SiLU'}
 
   posterior:
-    n_layers: 1
+    num_hiddens: null
     hidden_dim: 1024
     num_categories: 32
     num_codes: 32
@@ -70,7 +70,7 @@ wm:
     act: ${eval:'__import__("torch").nn.SiLU'}
 
   prior:
-    n_layers: 1
+    num_hiddens: null
     hidden_dim: 1024
     num_categories: 32
     num_codes: 32
@@ -82,7 +82,7 @@ wm:
     bin_low: -20.0
     bin_high: 20.0
     hidden_dim: 1024
-    n_layers: 2
+    num_hiddens: 1
     act: ${eval:'__import__("torch").nn.SiLU'}
 
   objectives:
@@ -98,7 +98,7 @@ wm:
 # ---------- actor / critic
 actor:
   hidden_dim: 1024
-  num_hiddens: 2
+  num_hiddens: 1
   actor_unimix: 0.01
   log_std_min: -5.0
   log_std_max: 2.0
@@ -107,7 +107,7 @@ actor:
 
 critic:
   hidden_dim: 1024
-  num_hiddens: 2
+  num_hiddens: 1
   num_bins: 255
   bin_low: -20.0
   bin_high: 20.0
@@ -134,7 +134,7 @@ train:
   train_ratio: 1              # 1 train_step per env step (effective ratio = 1)
                               # bump to 4 or 8 if convergence is too slow,
                               # 16+ for DreamerV3-style "data efficient"
-  train_ac_after: 5_000       # short AC warmup; 5k = 5% of budget
+  train_ac_after: 10_000       # short AC warmup; 5k = 5% of budget
 
   wm_batch_size: 16
   wm_seq_len: 64              # STORM uses 64

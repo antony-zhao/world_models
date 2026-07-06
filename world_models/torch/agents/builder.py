@@ -73,14 +73,14 @@ def build_sequence_model(cfg, latent_size, action_dim):
         return TransformerSequenceModel(
             latent_size,
             action_dim,
-            cfg.d_model,
-            cfg.n_layers,
-            cfg.num_heads,
-            cfg.max_seq_len,
-            cfg.expand,
-            cfg.dropout_p,
-            cfg.act,
-            cfg.use_sdpa,
+            d_model=cfg.d_model,
+            num_heads=cfg.num_heads,
+            n_layers=cfg.n_layers,
+            max_seq_len=cfg.max_seq_len,
+            expand=cfg.expand,
+            dropout_p=cfg.dropout_p,
+            act=cfg.act,
+            use_sdpa=cfg.use_sdpa,
         )
     else:
         raise NotImplementedError
@@ -93,7 +93,7 @@ def build_posterior(cfg, embed_dim, latent_size, d_model, includes_sequence_stat
         latent_size,
         dist_head,
         d_model,
-        cfg.n_layers,
+        cfg.num_hiddens,
         cfg.hidden_dim,
         cfg.act,
         includes_sequence_state,
@@ -102,15 +102,21 @@ def build_posterior(cfg, embed_dim, latent_size, d_model, includes_sequence_stat
 
 def build_prior(cfg, d_model, latent_size):
     dist_head = CategoricalHead(cfg.num_categories, cfg.num_codes, cfg.unimix_prob)
-    return Prior(d_model, latent_size, dist_head, cfg.n_layers, cfg.hidden_dim, cfg.act)
+    return Prior(d_model, latent_size, dist_head, cfg.num_hiddens, cfg.hidden_dim, cfg.act)
 
 
 def build_heads(cfg, in_dim):
     reward_predictor = TwoHotHead(
-        in_dim, cfg.num_bins, cfg.bin_low, cfg.bin_high, cfg.hidden_dim, cfg.n_layers, act=cfg.act
+        in_dim,
+        cfg.num_bins,
+        cfg.bin_low,
+        cfg.bin_high,
+        cfg.hidden_dim,
+        cfg.num_hiddens,
+        act=cfg.act,
     )
-    continue_predictor = BernoulliHead(in_dim, 1, cfg.hidden_dim, cfg.n_layers, cfg.act)
-    # reward_predictor.zero_init()
+    continue_predictor = BernoulliHead(in_dim, 1, cfg.hidden_dim, cfg.num_hiddens, cfg.act)
+    reward_predictor.zero_init()
     return reward_predictor, continue_predictor
 
 

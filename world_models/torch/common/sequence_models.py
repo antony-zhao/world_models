@@ -108,7 +108,7 @@ class RSSM(SequenceModel):
             hidden_dim * 3,
             d_model,
             hidden_dim,
-            n_layers=n_layers,
+            num_hiddens=n_layers,
         )
         self.proj = nn.Sequential(in_proj, norm, act_fn, mlp)
         self.gru = DreamerGRU(d_model, use_block_linear)
