@@ -39,7 +39,7 @@ echo ""
 
 # ---------- run loop ----------
 for game in $GAMES; do
-  for seed in $(seq 0 $((SEEDS - 1))); do
+  for seed in $(seq 1 $((SEEDS))); do
     run_name="${game}_seed${seed}"
     run_dir="${LOG_ROOT}/${run_name}"
     mkdir -p "$run_dir"

@@ -1,0 +1,89 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ML experiment outputs
+runs/
+checkpoints/
+outputs/
+logs/
+wandb/
+mlruns/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+tensorboard/
+events.out.tfevents.*
+
+# Data
+data/
+*.h5
+*.hdf5
+*.npy
+*.npz
+*.pkl
+*.pickle
+
+# Media (unless committed for docs/README)
+*.mp4
+*.avi
+*.mov
+*.gif
+# Keep small images intentional; uncomment if you want them ignored:
+# *.png
+# *.jpg
+# *.jpeg
+
+# Debug/scratch
+*.log
+scratch/
+tmp/
+tmp_*
+debug_*
+autoencode_*.png
+ball_check.png
+
+# Environment / secrets
+.env
+.env.local
+*.pem
+*.key
+
+# OS
+Thumbs.db
+test.py
+*.zip

@@ -7,6 +7,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import random
 from datetime import datetime
 from pathlib import Path
 
@@ -14,7 +15,7 @@ import ale_py
 import gymnasium as gym
 import numpy as np
 import torch
-from gymnasium.wrappers import AtariPreprocessing
+from gymnasium.wrappers.vector import TransformObservation
 from omegaconf import OmegaConf
 
 from world_models.torch.agents.agent import Agent
@@ -22,65 +23,48 @@ from world_models.utils.logger import Logger
 
 gym.register_envs(ale_py)
 
-
-# --------------------------------------------------------------------- env
-class LifeLossInfo(gym.Wrapper):
-    """Adds life_loss flag to info dict on life loss (STORM convention).
-    Does NOT modify terminations — the buffer write should OR life_loss
-    into terms separately.
-    """
-
-    def __init__(self, env):
-        super().__init__(env)
-        self.lives = None
-
-    def reset(self, **kwargs):
-        obs, info = self.env.reset(**kwargs)
-        self.lives = info.get("lives", 0)
-        info["life_loss"] = False
-        return obs, info
-
-    def step(self, action):
-        obs, reward, terminated, truncated, info = self.env.step(action)
-        current_lives = info.get("lives", self.lives)
-        if current_lives < self.lives:
-            info["life_loss"] = True
-            self.lives = current_lives
-        else:
-            info["life_loss"] = False
-        return obs, reward, terminated, truncated, info
+# Offset so eval env seeds never overlap the training env seed stream.
+EVAL_SEED_OFFSET = 10_000
 
 
-def make_env_fn(env_id: str, seed: int, full_action_space: bool = False):
-    def thunk():
-        env = gym.make(env_id, frameskip=1, full_action_space=full_action_space)
-        env = AtariPreprocessing(
-            env,
-            noop_max=30,
-            frame_skip=4,
-            screen_size=64,
-            grayscale_obs=False,
-            scale_obs=False,
-            terminal_on_life_loss=False,
-        )
-        env = gym.wrappers.TransformObservation(
-            env,
-            lambda obs: np.transpose(obs, (2, 0, 1)),
-            observation_space=gym.spaces.Box(low=0, high=255, shape=(3, 64, 64), dtype=np.uint8),
-        )
-        env.action_space.seed(seed)
-        return env
-
-    return thunk
+def _to_cxhxw(obs):
+    # AtariVectorEnv gives (N, stack=1, H, W, C); model wants (N, C, H, W).
+    return np.transpose(obs[:, 0], (0, 3, 1, 2))
 
 
 def build_envs(cfg):
-    train_envs = gym.vector.AsyncVectorEnv(
-        [make_env_fn(cfg.env.game, cfg.seed + i) for i in range(cfg.num_envs)],
+    common = dict(
+        img_height=64,
+        img_width=64,
+        grayscale=False,
+        stack_num=1,
+        frameskip=4,
+        maxpool=True,
+        noop_max=30,
+        episodic_life=False,
+        life_loss_info=True,  # life-loss comes through `terminated`, NOT info["life_loss"]
+        reward_clipping=False,
+        repeat_action_probability=0.0,
+        use_fire_reset=False,
+        full_action_space=True,
     )
-    eval_envs = gym.vector.AsyncVectorEnv(
-        [make_env_fn(cfg.env.game, cfg.seed + 10000 + i) for i in range(cfg.num_eval_envs)],
-    )
+    single_space = gym.spaces.Box(0, 255, (3, 64, 64), np.uint8)
+
+    def make(num):
+        env = ale_py.AtariVectorEnv(game=cfg.env.game, num_envs=num, **common)
+        batch_space = gym.spaces.Box(0, 255, (num, 3, 64, 64), np.uint8)
+        return TransformObservation(
+            env,
+            _to_cxhxw,
+            observation_space=batch_space,
+            single_observation_space=single_space,
+        )
+
+    train_envs = make(cfg.num_envs)
+    eval_envs = make(cfg.num_eval_envs)
+    # Seed the vector action-space RNG so prefill / any .sample() is reproducible.
+    train_envs.action_space.seed(cfg.seed)
+    eval_envs.action_space.seed(cfg.seed + EVAL_SEED_OFFSET)
     return train_envs, eval_envs
 
 
@@ -88,13 +72,18 @@ def build_envs(cfg):
 
 
 @torch.no_grad()
-def evaluate(agent, env, num_episodes):
-    """Evaluate using full-game returns (don't treat life loss as terminal)."""
+def evaluate(agent, env, num_episodes, eval_seed=None):
+    """Evaluate using full-game returns (don't treat life loss as terminal).
+
+    With life_loss_info=True the env reports `terminated=True` on every life
+    loss (without resetting until all lives are gone), so we detect a true
+    game-over as `terminated & (lives == 0)` and accumulate returns across lives.
+    """
     num_envs = env.num_envs
     returns_buffer = []
     lengths_buffer = []
 
-    obs, _ = env.reset()
+    obs, _ = env.reset(seed=eval_seed)
     agent.reset_eval_state()
 
     ep_returns = np.zeros(num_envs, dtype=np.float32)
@@ -102,14 +91,18 @@ def evaluate(agent, env, num_episodes):
 
     prev_dones = np.zeros(num_envs, dtype=bool)
     while len(returns_buffer) < num_episodes:
-        actions = agent.eval_act(obs.astype(np.float32), dones=prev_dones, det=True)
-        obs, rewards, terms, truncs, _ = env.step(actions)
+        actions = agent.eval_act(obs.astype(np.float32), dones=prev_dones, det=False)
+        obs, rewards, terms, truncs, infos = env.step(actions)
+        # prev_dones feeds the agent's context reset; life-loss terminals DO reset
+        # the recurrent/transformer context (consistent with training), so use the
+        # full terminal signal here.
         prev_dones = terms | truncs
+        game_over = terms & (infos["lives"] == 0)
 
         ep_returns += rewards
         ep_lengths += 1
 
-        for i in np.where(prev_dones)[0]:
+        for i in np.where(game_over)[0]:
             if len(returns_buffer) < num_episodes:
                 returns_buffer.append(float(ep_returns[i]))
                 lengths_buffer.append(int(ep_lengths[i]))
@@ -121,22 +114,6 @@ def evaluate(agent, env, num_episodes):
 # --------------------------------------------------------------- training
 
 
-def get_life_loss(infos, num_envs):
-    """Extract life_loss flags from vectorized info dict.
-    AsyncVectorEnv returns dict-of-arrays (gymnasium ≥0.26).
-    """
-    if "life_loss" not in infos:
-        return np.zeros(num_envs, dtype=bool)
-    raw = infos["life_loss"]
-    # In newer gymnasium AsyncVectorEnv, info values are arrays of length num_envs
-    # but masked with `_life_loss` for which envs actually have the key.
-    if isinstance(raw, np.ndarray):
-        if raw.dtype == bool or np.issubdtype(raw.dtype, np.integer):
-            return raw.astype(bool)
-    # Fallback: treat as all-False
-    return np.zeros(num_envs, dtype=bool)
-
-
 def prefill_buffer(agent, envs, cfg, initial_obs):
     obs = initial_obs
     episode_returns = np.zeros(cfg.num_envs, dtype=np.float32)
@@ -146,12 +123,13 @@ def prefill_buffer(agent, envs, cfg, initial_obs):
     for _ in range(cfg.train.prefill_steps):
         actions = envs.action_space.sample()
         next_obs, rewards, terms, truncs, infos = envs.step(actions)
-        life_loss = get_life_loss(infos, cfg.num_envs)
-        terms_for_buffer = terms | life_loss
+        # life_loss_info=True => `terms` already includes life-loss terminals.
+        terms_for_buffer = terms
         agent.add_transition(obs, actions, rewards, terms_for_buffer, truncs)
         episode_returns += rewards
-        dones = terms | truncs  # use real done for episode tracking
-        for i in np.where(dones)[0]:
+        # Full-game boundary for return tracking (life-loss is not game-over).
+        game_over = terms & (infos["lives"] == 0)
+        for i in np.where(game_over)[0]:
             completed.append(float(episode_returns[i]))
             episode_returns[i] = 0.0
         obs = next_obs
@@ -194,9 +172,16 @@ def main(cfg_path: str, overrides: list[str] = None):
     logger = Logger(str(log_dir))
     print(f"Logging to: {log_dir}")
 
-    # ---- seed
+    # ---- seed (env stream is seeded separately at reset / action_space.seed)
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
+    random.seed(cfg.seed)
+    if getattr(cfg, "deterministic", False):
+        # Full run-to-run determinism for debugging (costs some speed). See
+        # https://pytorch.org/docs/stable/notes/randomness.html
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
     # ---- envs
     train_envs, eval_envs = build_envs(cfg)
@@ -212,7 +197,7 @@ def main(cfg_path: str, overrides: list[str] = None):
     )
     print(f"Agent built. WM params: {wm_params:,}  AC params: {ac_params:,}")
 
-    # ---- initial reset
+    # ---- initial reset (seeds the training env stream deterministically)
     initial_obs, _ = train_envs.reset(seed=cfg.seed)
 
     # ---- prefill
@@ -227,13 +212,15 @@ def main(cfg_path: str, overrides: list[str] = None):
         # Interact
         actions = agent.act(obs.astype(np.float32))
         next_obs, rewards, terms, truncs, infos = train_envs.step(actions)
-        life_loss = get_life_loss(infos, cfg.num_envs)
-        terms_for_buffer = terms | life_loss
+        # life_loss_info=True => `terms` already includes life-loss terminals,
+        # which is exactly what we want in the buffer (STORM convention).
+        terms_for_buffer = terms
         agent.add_transition(obs, actions, rewards, terms_for_buffer, truncs)
 
         episode_returns += rewards
-        dones = terms | truncs  # real game-over for return logging
-        for i in np.where(dones)[0]:
+        # logging: only count a full game (all lives lost) as done
+        game_over = terms & (infos["lives"] == 0)
+        for i in np.where(game_over)[0]:
             completed_returns.append(float(episode_returns[i]))
             episode_returns[i] = 0.0
         obs = next_obs
@@ -257,7 +244,12 @@ def main(cfg_path: str, overrides: list[str] = None):
 
         # Evaluation
         if env_step % cfg.train.eval_every == 0:
-            eval_return, eval_length = evaluate(agent, eval_envs, cfg.train.eval_episodes)
+            eval_return, eval_length = evaluate(
+                agent,
+                eval_envs,
+                cfg.train.eval_episodes,
+                eval_seed=cfg.seed + EVAL_SEED_OFFSET,
+            )
             logger.add_scalar("eval/episode_return", eval_return)
             logger.add_scalar("eval/episode_length", eval_length)
             logger.write(env_step)

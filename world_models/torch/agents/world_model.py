@@ -179,6 +179,20 @@ class WorldModel(nn.Module):
             + dyn_loss * self.dyn_coef
             + repr_loss * self.repr_coef
         )
+
+        def categorical_entropy(logits):
+            # logits: (..., num_categories, num_codes) e.g. (B, T, 32, 32)
+            # entropy of each categorical group, summed over the 32 groups (matches Independent(...,1))
+            log_probs = logits - torch.logsumexp(logits, dim=-1, keepdim=True)  # normalize
+            probs = log_probs.exp()
+            ent_per_group = -(probs * log_probs).sum(
+                -1
+            )  # (B, T, 32) — entropy of each group in nats
+            ent = ent_per_group.sum(-1)  # (B, T) — total over the 32 groups
+            return ent.mean()  # scalar
+
+        loss_dict["wm/diag/post_entropy"] = to_numpy(categorical_entropy(post_logits))
+        loss_dict["wm/diag/prior_entropy"] = to_numpy(categorical_entropy(prior_logits))
         loss_dict["wm/loss/KL_div"] = to_numpy(dyn_loss)
         loss_dict["wm/loss/unclipped_KL"] = to_numpy(unclipped_kl)
         loss_dict = loss_dict | head_loss_dict

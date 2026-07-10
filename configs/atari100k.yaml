@@ -16,7 +16,7 @@ num_envs: 1                   # STORM/DreamerV3 Atari100k uses single env
 num_eval_envs: 5
 
 env:
-  game: ALE/Pong-v5
+  game: breakout
 
 # ---- set by train.py from env spaces
 action_dim: null
@@ -115,7 +115,7 @@ critic:
 
 buffer:
   num_envs: ${num_envs}
-  buffer_size: 200_000        # only need 2× the env budget
+  buffer_size: 100_000        # only need 2× the env budget
   prioritized: false
 
 # ---------- optimizer
