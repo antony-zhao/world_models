@@ -1,44 +1,25 @@
-from abc import ABC, abstractmethod
 from typing import List
 
-from world_models.torch.common.utils import symlog_squared_error
+import torch
+from torch import nn
+
+from world_models.torch.agents.actor_critic import Actor, Critic
+from world_models.torch.common.decoders import ConvDecoder
+from world_models.torch.common.models import TargetNetwork
+from world_models.torch.common.utils import compute_lambda_returns, symlog_squared_error
 
 
-class RepresentationObjective(ABC):
-    @abstractmethod
-    def __call__(self, context): ...
-
-    @property
-    def requires_decoder(self):
-        return False
-
-    @property
-    def requires_target_encoder(self):
-        return False
-
-    @property
-    def requires_augmentation(self):
-        return False
+class RepresentationObjective(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
 
 
-class CompoundObjective(RepresentationObjective):
+class CompoundObjective(nn.Module):
     def __init__(self, objectives: List):
         super().__init__()
-        self.objectives = objectives
+        self.objectives = nn.ModuleList(objectives)
 
-    @property
-    def requires_decoder(self):
-        return any(o.requires_decoder for o in self.objectives)
-
-    @property
-    def requires_target_encoder(self):
-        return any(o.requires_target_encoder for o in self.objectives)
-
-    @property
-    def requires_augmentation(self):
-        return any(o.requires_augmentation for o in self.objectives)
-
-    def __call__(self, context):
+    def forward(self, context):
         total_loss = 0.0
         merged_dict = {}
         for obj in self.objectives:
@@ -49,18 +30,33 @@ class CompoundObjective(RepresentationObjective):
 
 
 class ReconstructionObjective(RepresentationObjective):
-    def __init__(self, weight=1.0, obs_type="image"):
-        super().__init__()
-        self.weight = weight
-        self.obs_type = obs_type
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        self.weight = cfg.weight
+        self.obs_type = cfg.obs_type
+        self.decoder = self.build_decoder(cfg, cfg.encoder_conv_dim)
+        self.use_combined_state = cfg.use_combined_state
 
-    @property
-    def requires_decoder(self) -> bool:
-        return True
+    def build_decoder(self, cfg, encoder_output_dim):
+        if cfg.type == "conv":
+            return ConvDecoder(
+                cfg.latent_size + cfg.state_dim if cfg.use_combined_state else cfg.latent_size,
+                encoder_output_dim,
+                cfg.filter_base,
+                cfg.num_convs,
+                cfg.kernel_size,
+                cfg.image_channels,
+                cfg.act,
+            )
+        elif cfg.type == "vector":
+            raise NotImplementedError
+        else:
+            raise NotImplementedError
 
-    def __call__(self, context):
+    def forward(self, context):
         obs = context["obs"]
-        reconstructions = context["reconstructions"]
+        decoder_in = context["states"] if self.use_combined_state else context["latents"]
+        reconstructions = self.decoder(decoder_in)
 
         if self.obs_type == "image":
             loss = ((obs - reconstructions) ** 2).flatten(2).sum(-1).mean()
@@ -68,3 +64,79 @@ class ReconstructionObjective(RepresentationObjective):
             loss = symlog_squared_error(obs, reconstructions)
 
         return self.weight * loss, {"wm/loss/reconstruction_loss": loss.item()}
+
+
+class ActionPredictionObjective(RepresentationObjective):
+    def __init__(self, cfg):
+        # Original MuDreamer uses x_t and s_{t-1} for rssm,
+        # for the transformer/mamba we use x_t and x_{t-1}
+        # This specifically does mean to not use seq_state for transformer/mamba,
+        # as it provides action information to the prediction
+        super().__init__(cfg)
+        self.weight = cfg.weight
+        self.use_seq_state = cfg.use_seq_state
+        if cfg.use_seq_state:
+            input_dim = cfg.embedding_dim + cfg.state_dim
+        else:
+            input_dim = 2 * cfg.embedding_dim
+        self.action_predictor = Actor(
+            input_dim,
+            cfg.action_dim,
+            cfg.hidden_dim,
+            cfg.num_hiddens,
+            cfg.action_type,
+            cfg.act,
+            cfg.actor_unimix,
+            cfg.log_std_min,
+            cfg.log_std_max,
+            cfg.std_min,
+        )  # repurposing actor since it shares most of the same architecture
+
+    def forward(self, context):
+        if self.use_seq_state:
+            first_in = context["seq_states"][:, :-1]
+        else:
+            first_in = context["obs_embeddings"][:, :-1]
+        next_in = context["obs_embeddings"][:, 1:]
+        combined_in = torch.cat([first_in, next_in], -1)
+        action_dist = self.action_predictor.policy_dist(combined_in)
+        prediction_loss = -action_dist.log_prob(context["actions"][:, :-1]).mean()
+
+        return self.weight * prediction_loss, {
+            "wm/loss/action_prediction_loss": prediction_loss.item(),
+        }
+
+
+class ValueObjective(RepresentationObjective):
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        self.weight = cfg.weight
+        input_dim = cfg.latent_size + cfg.state_dim
+        self.value_predictor = Critic(
+            input_dim,
+            cfg.hidden_dim,
+            cfg.num_hiddens,
+            cfg.num_bins,
+            cfg.bin_low,
+            cfg.bin_high,
+            cfg.act,
+        )  # similarly repurposing the Critic since it has the same architecture
+        self.target = TargetNetwork(self.value_predictor, cfg.tau)
+        self.gamma = cfg.gamma
+        self.lambda_ = cfg.lambda_
+
+    def forward(self, context):
+        states = context["states"]
+        _, value_logits = self.value_predictor(states)
+        value_targets, _ = self.target(states)
+        returns = compute_lambda_returns(
+            value_targets.detach(),
+            context["rewards"][:, :-1],
+            1 - context["dones"][:, :-1],
+            self.gamma,
+            self.lambda_,
+        )
+        value_loss = (
+            -self.value_predictor.make_dist(value_logits[:, :-1]).log_prob(returns.detach())
+        ).mean()
+        return value_loss * self.weight, {"wm/loss/value_prediction_loss": value_loss.item()}

@@ -1,7 +1,6 @@
 from world_models.buffers.buffers import PerEnvBuffer
 from world_models.torch.agents.actor_critic import Actor, Critic
 from world_models.torch.agents.world_model import WorldModel
-from world_models.torch.common.decoders import ConvDecoder
 from world_models.torch.common.encoders import ConvEncoder
 from world_models.torch.common.heads import BernoulliHead, CategoricalHead, TwoHotHead
 from world_models.torch.common.models import Posterior, Prior
@@ -21,23 +20,6 @@ def build_encoder(cfg):
             cfg.kernel_size,
             cfg.image_channels,
             cfg.obs_shape[-1],
-            cfg.act,
-        )
-    elif cfg.type == "vector":
-        raise NotImplementedError
-    else:
-        raise NotImplementedError
-
-
-def build_decoder(cfg, encoder_output_size):
-    if cfg.type == "conv":
-        return ConvDecoder(
-            cfg.in_dim,
-            encoder_output_size,
-            cfg.filter_base,
-            cfg.num_convs,
-            cfg.kernel_size,
-            cfg.image_channels,
             cfg.act,
         )
     elif cfg.type == "vector":
@@ -120,11 +102,11 @@ def build_heads(cfg, in_dim):
     return reward_predictor, continue_predictor
 
 
-def build_objective(cfg, obs_type):
+def build_objective(cfg):
     objectives = []
     for obj_cfg in cfg.objectives:
         if obj_cfg.name == "reconstruction":
-            objectives.append(ReconstructionObjective(obj_cfg.weight, obs_type))
+            objectives.append(ReconstructionObjective(obj_cfg))
         elif obj_cfg.name == "infonce":
             raise NotImplementedError
         elif obj_cfg.name == "sigreg":
@@ -149,7 +131,6 @@ def build_world_model(cfg, action_dim) -> WorldModel:
     objective = build_objective(cfg, cfg.obs_type)
     head_in_dim = latent_size + d_model if cfg.use_combined_state else d_model
     reward_predictor, continue_predictor = build_heads(cfg.heads, head_in_dim)
-    decoder = build_decoder(cfg.decoder, encoder.conv_dim) if objective.requires_decoder else None
     return WorldModel(
         encoder,
         sequence_model,
@@ -165,7 +146,6 @@ def build_world_model(cfg, action_dim) -> WorldModel:
         cfg.head_coef,
         cfg.free_nats,
         cfg.use_combined_state,
-        decoder,
     )
 
 
