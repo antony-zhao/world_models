@@ -4,7 +4,12 @@ from world_models.torch.agents.world_model import WorldModel
 from world_models.torch.common.encoders import ConvEncoder
 from world_models.torch.common.heads import BernoulliHead, CategoricalHead, TwoHotHead
 from world_models.torch.common.models import Posterior, Prior
-from world_models.torch.common.objectives import CompoundObjective, ReconstructionObjective
+from world_models.torch.common.objectives import (
+    ActionObjective,
+    CompoundObjective,
+    ReconstructionObjective,
+    ValueObjective,
+)
 from world_models.torch.common.sequence_models import (
     RSSM,
     MambaSequenceModel,
@@ -107,6 +112,10 @@ def build_objective(cfg):
     for obj_cfg in cfg.objectives:
         if obj_cfg.name == "reconstruction":
             objectives.append(ReconstructionObjective(obj_cfg))
+        elif obj_cfg.name == "action_prediction":
+            objectives.append(ActionObjective(obj_cfg))
+        elif obj_cfg.name == "value_prediction":
+            objectives.append(ValueObjective(obj_cfg))
         elif obj_cfg.name == "infonce":
             raise NotImplementedError
         elif obj_cfg.name == "sigreg":
@@ -123,12 +132,12 @@ def build_world_model(cfg, action_dim) -> WorldModel:
     latent_size = cfg.latent.num_categories * cfg.latent.num_codes
     encoder = build_encoder(cfg.encoder)
     sequence_model = build_sequence_model(cfg.sequence_model, latent_size, action_dim)
-    d_model = sequence_model.output_dim
+    d_model = cfg.sequence_model.d_model
     embed_dim = encoder.output_dim
     includes_h = isinstance(sequence_model, RSSM)
     posterior = build_posterior(cfg.posterior, embed_dim, latent_size, d_model, includes_h)
     prior = build_prior(cfg.prior, d_model, latent_size)
-    objective = build_objective(cfg, cfg.obs_type)
+    objective = build_objective(cfg)
     head_in_dim = latent_size + d_model if cfg.use_combined_state else d_model
     reward_predictor, continue_predictor = build_heads(cfg.heads, head_in_dim)
     return WorldModel(

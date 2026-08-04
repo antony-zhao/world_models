@@ -25,11 +25,9 @@ class WorldModel(nn.Module):
         head_coef=1.0,
         free_nats=1.0,
         use_combined_state=False,
-        decoder=None,
     ):
         super().__init__()
         self.encoder = encoder
-        self.decoder = decoder
         self.sequence_model = sequence_model
         self.posterior = posterior
         self.prior = prior
@@ -139,25 +137,12 @@ class WorldModel(nn.Module):
             states = make_state(latents, seq_states)
             continue_dist = self.continue_predictor(states)
             reward_twohot = self.reward_predictor(states)
-            if self.decoder is None:
-                reconstructions = None
-            else:
-                reconstructions = self.decoder(states)
         else:
             states = None
-            if latents.ndim > seq_states.ndim:
-                decoder_latents = latents.flatten(-2)
-            else:
-                decoder_latents = latents
             continue_dist = self.continue_predictor(seq_states)
             reward_twohot = self.reward_predictor(seq_states)
-            if self.decoder is None:
-                reconstructions = None
-            else:
-                reconstructions = self.decoder(decoder_latents)
         context = {
             "obs": transformed_obs,
-            "reconstructions": reconstructions,
             "rewards": rewards,
             "terminated": terminated,
             "dones": dones,

@@ -6,12 +6,14 @@ from torch import nn
 from world_models.torch.agents.actor_critic import Actor, Critic
 from world_models.torch.common.decoders import ConvDecoder
 from world_models.torch.common.models import TargetNetwork
-from world_models.torch.common.utils import compute_lambda_returns, symlog_squared_error
+from world_models.torch.common.utils import compute_lambda_returns, make_state, symlog_squared_error
 
 
 class RepresentationObjective(nn.Module):
     def __init__(self, cfg):
         super().__init__()
+
+    def step(self): ...
 
 
 class CompoundObjective(nn.Module):
@@ -27,6 +29,10 @@ class CompoundObjective(nn.Module):
             total_loss = total_loss + loss
             merged_dict |= metrics
         return total_loss, merged_dict
+
+    def step(self):
+        for obj in self.objectives:
+            obj.step()
 
 
 class ReconstructionObjective(RepresentationObjective):
@@ -55,7 +61,9 @@ class ReconstructionObjective(RepresentationObjective):
 
     def forward(self, context):
         obs = context["obs"]
-        decoder_in = context["states"] if self.use_combined_state else context["latents"]
+        decoder_in = (
+            context["states"] if self.use_combined_state else context["latents"].flatten(-2)
+        )
         reconstructions = self.decoder(decoder_in)
 
         if self.obs_type == "image":
@@ -66,7 +74,7 @@ class ReconstructionObjective(RepresentationObjective):
         return self.weight * loss, {"wm/loss/reconstruction_loss": loss.item()}
 
 
-class ActionPredictionObjective(RepresentationObjective):
+class ActionObjective(RepresentationObjective):
     def __init__(self, cfg):
         # Original MuDreamer uses x_t and s_{t-1} for rssm,
         # for the transformer/mamba we use x_t and x_{t-1}
@@ -126,13 +134,13 @@ class ValueObjective(RepresentationObjective):
         self.lambda_ = cfg.lambda_
 
     def forward(self, context):
-        states = context["states"]
+        states = make_state(context["latents"], context["seq_states"])
         _, value_logits = self.value_predictor(states)
         value_targets, _ = self.target(states)
         returns = compute_lambda_returns(
             value_targets.detach(),
             context["rewards"][:, :-1],
-            1 - context["dones"][:, :-1],
+            1 - context["terminated"][:, :-1].float(),
             self.gamma,
             self.lambda_,
         )
@@ -140,3 +148,6 @@ class ValueObjective(RepresentationObjective):
             -self.value_predictor.make_dist(value_logits[:, :-1]).log_prob(returns.detach())
         ).mean()
         return value_loss * self.weight, {"wm/loss/value_prediction_loss": value_loss.item()}
+
+    def step(self):
+        self.target.update()

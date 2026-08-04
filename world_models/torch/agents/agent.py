@@ -190,6 +190,7 @@ class Agent(nn.Module):
         wm_loss.backward()
         nn.utils.clip_grad_norm_(self.world_model.parameters(), self.wm_clip)
         self.optim_wm.step()
+        self.world_model.objective.step()
         return wm_loss, wm_loss_dict, latents, seq_states
 
     def _train_actor_critic(self, context):
