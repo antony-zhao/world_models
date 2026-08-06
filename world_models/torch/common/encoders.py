@@ -16,8 +16,8 @@ class ConvEncoder(nn.Module):
         kernel_size=4,
         image_channels=3,
         input_size=64,
+        norm="layer",
         act=nn.SiLU,
-        norm=ChannelNorm,
     ):
         super().__init__()
         filters = [filter_base * 2**i for i in range(num_convs)]
@@ -34,7 +34,7 @@ class ConvEncoder(nn.Module):
                 )
             )
             if i < len(filters) - 1:
-                layers.append(norm(filter))
+                layers.append(ChannelNorm(norm, filter))
                 layers.append(act())
         self.layers = nn.Sequential(*layers)
         size = input_size // (2**num_convs)

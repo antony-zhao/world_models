@@ -18,7 +18,6 @@ obs_shape: null
 # ---- Shared model defaults
 model:
   hidden_dim: 1024
-  act: silu
 
 # ---- Shared symlog discretization for value/reward heads
 symlog:
@@ -32,7 +31,6 @@ wm:
   use_combined_state: false
   free_nats: 1.0
 
-  # Loss coefficients
   obj_coef: 1.0
   dyn_coef: 0.5
   repr_coef: 0.1
@@ -73,13 +71,11 @@ wm:
     - name: reconstruction
       weight: 1.0
       obs_type: image
-      # Decoder architecture (mirrors encoder by default)
       type: conv
       filter_base: 32
       num_convs: 4
       kernel_size: 4
 
-# ---- Actor / critic
 actor:
   num_hiddens: 1
   actor_unimix: 0.01

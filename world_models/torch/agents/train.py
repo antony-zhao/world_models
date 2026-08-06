@@ -19,6 +19,7 @@ from gymnasium.wrappers.vector import TransformObservation
 from omegaconf import OmegaConf
 
 from world_models.torch.agents.agent import Agent
+from world_models.utils.config import preprocess_config
 from world_models.utils.logger import Logger
 
 gym.register_envs(ale_py)
@@ -187,6 +188,7 @@ def main(cfg_path: str, overrides: list[str] = None):
     train_envs, eval_envs = build_envs(cfg)
     cfg.action_dim = int(train_envs.single_action_space.n)
     cfg.obs_shape = tuple(int(x) for x in train_envs.single_observation_space.shape)
+    cfg = preprocess_config(cfg)
     print(f"Env: {cfg.env.game}  action_dim={cfg.action_dim}  obs_shape={cfg.obs_shape}")
 
     # ---- agent

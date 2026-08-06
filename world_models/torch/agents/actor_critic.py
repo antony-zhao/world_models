@@ -17,17 +17,17 @@ class Actor(nn.Module):
         hidden_dim,
         num_hiddens,
         action_type,
-        act=nn.SiLU,
         actor_unimix=None,
         log_std_min=None,
         log_std_max=None,
         std_min=None,
+        act=nn.SiLU,
     ):
         super().__init__()
         self.action_dim = action_dim
         self.action_type = action_type
         if action_type == "discrete":
-            self.mlp = MLP(input_dim, action_dim, hidden_dim, num_hiddens, act)
+            self.mlp = MLP(input_dim, action_dim, hidden_dim, num_hiddens, act=act)
             self.actor_unimix = actor_unimix
         else:
             self.mlp = ContMLP(
@@ -35,10 +35,10 @@ class Actor(nn.Module):
                 action_dim,
                 hidden_dim,
                 num_hiddens,
-                act,
                 log_std_min,
                 log_std_max,
                 std_min,
+                act=act,
             )
 
     def policy_dist(self, x):
@@ -85,7 +85,7 @@ class Critic(nn.Module):
         self, input_dim, hidden_dim, num_hiddens, num_bins, bin_low, bin_high, act=nn.SiLU
     ):
         super().__init__()
-        self.mlp = MLP(input_dim, hidden_dim, hidden_dim, num_hiddens - 1, act)
+        self.mlp = MLP(input_dim, hidden_dim, hidden_dim, num_hiddens - 1, act=act)
         self.twohot = TwoHotHead(hidden_dim, num_bins, bin_low, bin_high, hidden_dim, None)
         self.twohot.zero_init()
 

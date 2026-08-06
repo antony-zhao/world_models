@@ -25,7 +25,6 @@ def build_encoder(cfg):
             cfg.kernel_size,
             cfg.image_channels,
             cfg.obs_shape[-1],
-            cfg.act,
         )
     elif cfg.type == "vector":
         raise NotImplementedError
@@ -41,7 +40,6 @@ def build_sequence_model(cfg, latent_size, action_dim):
             cfg.d_model,
             cfg.hidden_dim,
             cfg.n_layers,
-            cfg.act,
             cfg.use_block_linear,
         )
     elif cfg.type == "mamba":
@@ -54,7 +52,6 @@ def build_sequence_model(cfg, latent_size, action_dim):
             cfg.d_conv,
             cfg.expand,
             cfg.headdim,
-            cfg.act,
         )
     elif cfg.type == "transformer":
         return TransformerSequenceModel(
@@ -66,7 +63,6 @@ def build_sequence_model(cfg, latent_size, action_dim):
             max_seq_len=cfg.max_seq_len,
             expand=cfg.expand,
             dropout_p=cfg.dropout_p,
-            act=cfg.act,
             use_sdpa=cfg.use_sdpa,
         )
     else:
@@ -82,14 +78,19 @@ def build_posterior(cfg, embed_dim, latent_size, d_model, includes_sequence_stat
         d_model,
         cfg.num_hiddens,
         cfg.hidden_dim,
-        cfg.act,
         includes_sequence_state,
     )
 
 
 def build_prior(cfg, d_model, latent_size):
     dist_head = CategoricalHead(cfg.num_categories, cfg.num_codes, cfg.unimix_prob)
-    return Prior(d_model, latent_size, dist_head, cfg.num_hiddens, cfg.hidden_dim, cfg.act)
+    return Prior(
+        d_model,
+        latent_size,
+        dist_head,
+        cfg.num_hiddens,
+        cfg.hidden_dim,
+    )
 
 
 def build_heads(cfg, in_dim):
@@ -100,9 +101,13 @@ def build_heads(cfg, in_dim):
         cfg.bin_high,
         cfg.hidden_dim,
         cfg.num_hiddens,
-        act=cfg.act,
     )
-    continue_predictor = BernoulliHead(in_dim, 1, cfg.hidden_dim, cfg.num_hiddens, cfg.act)
+    continue_predictor = BernoulliHead(
+        in_dim,
+        1,
+        cfg.hidden_dim,
+        cfg.num_hiddens,
+    )
     reward_predictor.zero_init()
     return reward_predictor, continue_predictor
 
@@ -165,7 +170,6 @@ def build_actor(cfg, input_dim, action_dim, action_type) -> Actor:
         cfg.hidden_dim,
         cfg.num_hiddens,
         action_type,
-        cfg.act,
         cfg.actor_unimix,
         cfg.log_std_min,
         cfg.log_std_max,
@@ -181,7 +185,6 @@ def build_critic(cfg, input_dim) -> Critic:
         cfg.num_bins,
         cfg.bin_low,
         cfg.bin_high,
-        cfg.act,
     )
 
 

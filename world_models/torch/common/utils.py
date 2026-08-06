@@ -2,6 +2,32 @@ import numpy as np
 import torch
 from torch import nn
 
+ACTIVATION_MAP = {
+    "silu": nn.SiLU,
+    "relu": nn.ReLU,
+    "gelu": nn.GELU,
+    "tanh": nn.Tanh,
+    "elu": nn.ELU,
+    "leaky_relu": nn.LeakyReLU,
+}
+
+
+def get_activation(name):
+    return ACTIVATION_MAP[name.lower()]
+
+
+def get_norm(name, dim):
+    if name is None or name.lower() == "none":
+        return nn.Identity()
+    elif name.lower() == "layer":
+        return nn.LayerNorm(dim, eps=1e-6)
+    elif name.lower() == "rms":
+        return nn.RMSNorm(dim, eps=1e-6)
+    elif name.lower() == "batch":
+        return nn.BatchNorm1d(dim)
+    else:
+        raise ValueError(f"Unknown norm: {name}")
+
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     nn.init.orthogonal_(layer.weight, std)
@@ -48,6 +74,7 @@ def transform_obs(obs, is_image):
     return transformed_obs
 
 
+# the initializers are old/unused but are still here for now, might delete later
 def init_last_layer(model, init_func):
     for module in model.modules():
         if isinstance(module, (nn.Linear)):

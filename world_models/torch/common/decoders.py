@@ -15,13 +15,13 @@ class ConvDecoder(nn.Module):
         num_convs=4,
         kernel_size=4,
         image_channels=3,
+        norm="layer",
         act=nn.SiLU,
-        norm=ChannelNorm,
     ):
         super().__init__()
         filters = [filter_base * 2**i for i in reversed(range(num_convs))]
         layers = []
-        self.conv_dim = conv_dim
+        self.conv_dim = tuple(conv_dim)
         layers.append(nn.Linear(in_dim, np.prod(conv_dim)))
         layers.append(nn.Unflatten(-1, self.conv_dim))
         for i, filter in enumerate(filters):
@@ -36,7 +36,7 @@ class ConvDecoder(nn.Module):
                 )
             )
             if i < len(filters) - 1:
-                layers.append(norm(filters[i + 1]))
+                layers.append(ChannelNorm(norm, filters[i + 1]))
                 layers.append(act())
         self.layers = nn.Sequential(*layers)
 

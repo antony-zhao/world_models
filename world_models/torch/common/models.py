@@ -5,6 +5,8 @@ from mamba_ssm import Mamba2
 from torch import nn
 from torch.nn import functional as F
 
+from world_models.torch.common.utils import get_norm
+
 
 class SkipLinear(nn.Module):
     def __init__(self, dim, bias=True):
@@ -32,10 +34,10 @@ class MLP(nn.Module):
         output_dim,
         hidden_dim=256,
         num_hiddens=2,
-        act=nn.SiLU,
-        norm=True,
-        final_act=None,
+        norm="layer",
         skip_connections=False,
+        final_act=None,
+        act=nn.SiLU,
     ):
         super().__init__()
         if num_hiddens is None:
@@ -44,19 +46,19 @@ class MLP(nn.Module):
 
         def norm_act():
             parts = []
-            if norm:
-                parts.append(nn.LayerNorm(hidden_dim, eps=1e-6))
+            parts.append(get_norm(norm, hidden_dim))
             parts.append(act())
             return parts
 
-        layers = [nn.Linear(input_dim, hidden_dim, bias=not norm)]
+        use_bias = norm == "none" or norm is None
+        layers = [nn.Linear(input_dim, hidden_dim, bias=use_bias)]
         layers.extend(norm_act())
 
         for _ in range(num_hiddens):
             if skip_connections:
-                layers.append(SkipLinear(hidden_dim, bias=not norm))
+                layers.append(SkipLinear(hidden_dim, bias=use_bias))
             else:
-                layers.append(nn.Linear(hidden_dim, hidden_dim, bias=not norm))
+                layers.append(nn.Linear(hidden_dim, hidden_dim, bias=use_bias))
             layers.extend(norm_act())
 
         layers.append(nn.Linear(hidden_dim, output_dim))
@@ -70,7 +72,7 @@ class MLP(nn.Module):
 
 
 class ResBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, act=nn.GELU):
+    def __init__(self, in_channels, out_channels, kernel_size, act=nn.SiLU):
         super().__init__()
         padding = int((kernel_size - 1) // 2)
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size, padding=padding)
@@ -85,7 +87,7 @@ class ResBlock(nn.Module):
 
 
 class IMPALABlock(nn.Module):
-    def __init__(self, in_channels, out_channels, act=nn.GELU, num_blocks=2):
+    def __init__(self, in_channels, out_channels, act=nn.SiLU, num_blocks=2):
         super().__init__()
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
         self.pool1 = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
@@ -102,7 +104,7 @@ class IMPALABlock(nn.Module):
 
 
 class IMPALACNN(nn.Module):
-    def __init__(self, image_size, num_blocks, image_channels=3, channel_base=16, act=nn.GELU):
+    def __init__(self, image_size, num_blocks, image_channels=3, channel_base=16, act=nn.SiLU):
         super().__init__()
         channels = [image_channels] + [channel_base * 2**i for i in range(num_blocks)]
         self.image_size = image_size
@@ -122,9 +124,10 @@ class IMPALACNN(nn.Module):
 
 
 class ChannelNorm(nn.Module):
-    def __init__(self, num_channels, eps=1e-6):
+    def __init__(self, name, num_channels, eps=1e-6):
+        # For now this doesn't support batchnorm
         super().__init__()
-        self.norm = nn.LayerNorm(num_channels, eps)
+        self.norm = get_norm(name, num_channels)
 
     def forward(self, x):
         x = x.permute(0, 2, 3, 1)
@@ -140,10 +143,10 @@ class ContMLP(nn.Module):
         output_dim,
         hidden_dim,
         num_hiddens,
-        act=nn.SiLU,
         log_std_min=-5.0,
         log_std_max=2.0,
         std_min=0.1,
+        act=nn.SiLU,
     ):
         super().__init__()
         self.mlp = MLP(input_dim, hidden_dim, hidden_dim, num_hiddens, act)
@@ -173,7 +176,6 @@ class Posterior(nn.Module):
         d_model=None,
         num_hiddens=2,
         hidden_dim=256,
-        act=nn.SiLU,
         includes_sequence_state=False,
     ):
         super().__init__()
@@ -196,7 +198,7 @@ class Posterior(nn.Module):
 
 
 class Prior(nn.Module):
-    def __init__(self, d_model, out_dim, dist_head, num_hiddens=2, hidden_dim=256, act=nn.SiLU):
+    def __init__(self, d_model, out_dim, dist_head, num_hiddens=2, hidden_dim=256):
         super().__init__()
         self.proj = MLP(d_model, out_dim, hidden_dim, num_hiddens)
         self.dist_head = dist_head
@@ -281,16 +283,10 @@ class TargetNetwork(nn.Module):
 
 class MambaBlock(nn.Module):
     def __init__(
-        self,
-        d_model,
-        layer_idx,
-        d_state=128,
-        d_conv=4,
-        expand=2,
-        headdim=64,
+        self, d_model, layer_idx, d_state=128, d_conv=4, expand=2, headdim=64, norm="layer"
     ):
         super().__init__()
-        self.norm = nn.LayerNorm(d_model)
+        self.norm = get_norm(norm, d_model)
         self.mamba = Mamba2(
             d_model=d_model,
             d_state=d_state,
@@ -394,6 +390,7 @@ class TransformerBlock(nn.Module):
         is_causal=True,
         use_sdpa=True,  # if true uses the "scaled_dot_product_attention"
         # built into pytorch (that can take advantage of flash attention)
+        norm="layer",
     ):
         super().__init__()
         assert d_model % num_heads == 0
@@ -404,11 +401,11 @@ class TransformerBlock(nn.Module):
         self.dropout = dropout
         self.causal = is_causal
 
-        self.rms1 = nn.LayerNorm(d_model)
+        self.rms1 = get_norm(norm, d_model)
         self.qkv = nn.Linear(d_model, d_model * 3, bias=False)
         self.out_proj = nn.Linear(d_model, d_model, bias=False)
 
-        self.rms2 = nn.LayerNorm(d_model)
+        self.rms2 = get_norm(norm, d_model)
         self.ff = TransformerFFNetwork(d_model, expand, dropout, act)
 
         self.rope = RotaryEmbedding(self.head_dim, max_seq_len=max_seq_len)

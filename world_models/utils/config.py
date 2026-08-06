@@ -43,13 +43,7 @@ def _get_nested(cfg, path):
 
 
 def preprocess_config(cfg: DictConfig) -> DictConfig:
-    """Fill in cross-field defaults from shared sections.
-
-    After this runs, every per-module config section has all fields needed
-    for construction. Encoder-derived dims (encoder_output_dim, latent_dim,
-    etc.) are NOT filled here — those are injected by WorldModel.__init__
-    since they depend on constructed modules.
-    """
+    """Fill in cross-field defaults from shared sections."""
     OmegaConf.set_struct(cfg, False)
 
     # ---- Propagate latent dims to posterior/prior ----
@@ -73,54 +67,13 @@ def preprocess_config(cfg: DictConfig) -> DictConfig:
         if node is not None:
             _set_if_missing(node, "hidden_dim", cfg.model.hidden_dim)
 
-    # ---- Propagate args to each objective in the list ----
-    for obj_cfg in cfg.wm.objectives:
-        _set_if_missing(obj_cfg, "hidden_dim", cfg.model.hidden_dim)
-        _set_if_missing(obj_cfg, "act", cfg.model.act)
-        _set_if_missing(obj_cfg, "latent_size", cfg.wm.latent_size)
-        _set_if_missing(obj_cfg, "state_dim", cfg.wm.sequence_model.d_model)
-        _set_if_missing(obj_cfg, "use_combined_state", cfg.wm.use_combined_state)
-        # For action_prediction: needs action_dim + action_type
-        _set_if_missing(obj_cfg, "action_dim", cfg.action_dim)
-        _set_if_missing(obj_cfg, "action_type", cfg.action_type)
-        _set_if_missing(obj_cfg, "embedding_dim", cfg.wm.embedding_dim)
-
-        # For reconstruction: needs encoder_conv_dim + image_channels
-        _set_if_missing(obj_cfg, "encoder_conv_dim", cfg.wm.encoder_conv_dim)
-        if cfg.obs_shape is not None:
-            _set_if_missing(obj_cfg, "image_channels", list(cfg.obs_shape)[0])
-
-        # For value_prediction: symlog bins
-        _set_if_missing(obj_cfg, "num_bins", cfg.symlog.num_bins)
-        _set_if_missing(obj_cfg, "bin_low", cfg.symlog.low)
-        _set_if_missing(obj_cfg, "bin_high", cfg.symlog.high)
-
-    # ---- Propagate activation from model.act ----
-    act_targets = [
-        ("wm", "encoder"),
-        ("wm", "sequence_model"),
-        ("wm", "posterior"),
-        ("wm", "prior"),
-        ("wm", "heads"),
-        ("actor",),
-        ("critic",),
-    ]
-    for path in act_targets:
-        node = _get_nested(cfg, path)
-        if node is not None:
-            _set_if_missing(node, "act", cfg.model.act)
-
-    # ---- Propagate activation to each objective in the list ----
-    for obj_cfg in cfg.wm.objectives:
-        _set_if_missing(obj_cfg, "act", cfg.model.act)
-
     # ---- Propagate symlog bins to heads and critic ----
     for section in [cfg.wm.heads, cfg.critic]:
         _set_if_missing(section, "num_bins", cfg.symlog.num_bins)
         _set_if_missing(section, "bin_low", cfg.symlog.low)
         _set_if_missing(section, "bin_high", cfg.symlog.high)
 
-    # ---- Set encoder image_channels and obs_shape from cfg.obs_shape ----
+    # ---- Compute encoder image_channels, obs_shape, embedding_dim, encoder_conv_dim ----
     if cfg.obs_shape is not None:
         obs_shape = list(cfg.obs_shape)
         if cfg.wm.encoder.type == "conv":
@@ -133,8 +86,24 @@ def preprocess_config(cfg: DictConfig) -> DictConfig:
         cfg.wm.embedding_dim = filter * spatial * spatial
         cfg.wm.encoder_conv_dim = (filter, spatial, spatial)
 
-    # ---- Set posterior/prior norm_type defaults ----
-    _set_if_missing(cfg.wm.posterior, "norm_type", "layer")
-    _set_if_missing(cfg.wm.prior, "norm_type", "layer")
+    # ---- Propagate args to each objective in the list ----
+    for obj_cfg in cfg.wm.objectives:
+        _set_if_missing(obj_cfg, "hidden_dim", cfg.model.hidden_dim)
+        _set_if_missing(obj_cfg, "latent_size", cfg.wm.latent_size)
+        _set_if_missing(obj_cfg, "state_dim", cfg.wm.sequence_model.d_model)
+        _set_if_missing(obj_cfg, "use_combined_state", cfg.wm.use_combined_state)
+        _set_if_missing(obj_cfg, "action_dim", cfg.action_dim)
+        _set_if_missing(obj_cfg, "action_type", cfg.action_type)
+        _set_if_missing(obj_cfg, "embedding_dim", cfg.wm.embedding_dim)
+        _set_if_missing(obj_cfg, "encoder_conv_dim", cfg.wm.encoder_conv_dim)
+        if cfg.obs_shape is not None:
+            _set_if_missing(obj_cfg, "image_channels", list(cfg.obs_shape)[0])
+        _set_if_missing(obj_cfg, "num_bins", cfg.symlog.num_bins)
+        _set_if_missing(obj_cfg, "bin_low", cfg.symlog.low)
+        _set_if_missing(obj_cfg, "bin_high", cfg.symlog.high)
+
+    # ---- Set posterior/prior norm defaults ----
+    _set_if_missing(cfg.wm.posterior, "norm", "layer")
+    _set_if_missing(cfg.wm.prior, "norm", "layer")
 
     return cfg

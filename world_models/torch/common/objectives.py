@@ -52,7 +52,6 @@ class ReconstructionObjective(RepresentationObjective):
                 cfg.num_convs,
                 cfg.kernel_size,
                 cfg.image_channels,
-                cfg.act,
             )
         elif cfg.type == "vector":
             raise NotImplementedError
@@ -93,7 +92,6 @@ class ActionObjective(RepresentationObjective):
             cfg.hidden_dim,
             cfg.num_hiddens,
             cfg.action_type,
-            cfg.act,
             cfg.actor_unimix,
             cfg.log_std_min,
             cfg.log_std_max,
@@ -127,7 +125,6 @@ class ValueObjective(RepresentationObjective):
             cfg.num_bins,
             cfg.bin_low,
             cfg.bin_high,
-            cfg.act,
         )  # similarly repurposing the Critic since it has the same architecture
         self.target = TargetNetwork(self.value_predictor, cfg.tau)
         self.gamma = cfg.gamma
