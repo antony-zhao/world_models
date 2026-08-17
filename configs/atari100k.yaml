@@ -9,7 +9,7 @@ num_envs: 1
 num_eval_envs: 5
 
 env:
-  game: breakout
+  game: pong
 
 action_dim: null
 action_type: discrete
@@ -70,6 +70,7 @@ wm:
   objectives:
     - name: reconstruction
       weight: 1.0
+      stop_grad: False
       obs_type: image
       type: conv
       filter_base: 32
@@ -103,7 +104,7 @@ train:
   prefill_steps: 1_000
   train_every: 1
   train_ratio: 1
-  train_ac_after: 10_000
+  train_ac_after: 5_000
 
   wm_batch_size: 16
   wm_seq_len: 64

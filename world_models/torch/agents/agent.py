@@ -171,13 +171,12 @@ class Agent(nn.Module):
             if self.is_rssm:
                 initial_latent = old_latent
                 initial_seq = old_seq
-                ac_metrics = self._train_actor_critic((initial_latent, initial_seq))
+                ac_metrics = self._train_actor_critic((initial_latent, initial_seq, terms, dones))
             else:
                 context_obs, context_actions, _, context_terms, context_truncs = (
                     self.buffer.sample_as_tensors(self.device, self.ac_batch_size, self.ac_seq_len)
                 )
-                context_dones = torch.logical_or(context_terms, context_truncs)
-                ac_metrics = self._train_actor_critic((context_obs, context_actions, context_dones))
+                ac_metrics = self._train_actor_critic((context_obs, context_actions, context_terms))
             return wm_loss, wm_metrics | ac_metrics
         else:
             return wm_loss, wm_metrics
@@ -195,23 +194,27 @@ class Agent(nn.Module):
 
     def _train_actor_critic(self, context):
         if self.is_rssm:
-            initial_latent, initial_seq = context
+            initial_latent, initial_seq, dones, terms = context
             initial_latent = initial_latent.flatten(0, 1)
             initial_seq = initial_seq.flatten(0, 1)
             latents, actor_seq, head_seq, actions = self.world_model.imagine(
-                None, None, self.horizon, self.actor, None, initial_latent, initial_seq
+                None, None, self.horizon, self.actor, dones, initial_latent, initial_seq
             )
+            initial_continue = None  # need to check shapes/what to assign later
         else:
-            context_obs, context_actions, context_dones = context
+            context_obs, context_actions, context_terms = context
             context_actions = self._actions_to_model_input(context_actions)
             latents, actor_seq, head_seq, actions = self.world_model.imagine(
-                context_obs, context_actions, self.horizon, self.actor, context_dones
+                context_obs, context_actions, self.horizon, self.actor
             )
+            initial_continue = 1 - context_terms[:, -1].float()
         head_state = (
             make_state(latents, head_seq) if self.world_model.use_combined_state else head_seq
         )
         reward_pred = self.world_model.reward_predictor(head_state).mean().detach()
         continue_pred = self.world_model.continue_predictor(head_state).mean.squeeze(-1).detach()
+        continue_pred[:, 0] = initial_continue
+        weights = torch.cumprod(continue_pred * self.gamma, 1).detach() / self.gamma
         actor_state = make_state(latents, actor_seq).detach()
         values, value_logits = self.critic(actor_state)
         value_targets, _ = self.critic_target(actor_state)
@@ -228,11 +231,11 @@ class Agent(nn.Module):
         if log_probs.dim() > adv.dim():
             log_probs = log_probs.sum(-1)
             entropy = entropy.sum(-1)
-        actor_loss = -(adv * log_probs + self.entropy_coef * entropy).mean()
-        critic_loss = (
-            -self.critic.make_dist(value_logits).log_prob(value_targets.detach()).mean()
-            - self.critic.make_dist(value_logits[:, :-1]).log_prob(returns.detach())
-        ).mean()
+        actor_loss = -((adv * log_probs + self.entropy_coef * entropy) * weights[:, :-1]).mean()
+        value_dist = self.critic.make_dist(value_logits[:, :-1])
+        critic_main = -value_dist.log_prob(returns.detach())
+        critic_reg = -value_dist.log_prob(value_targets[:, :-1].detach())
+        critic_loss = ((critic_main + critic_reg) * weights[:, :-1]).mean()
         self.optim_critic.zero_grad(set_to_none=True)
         critic_loss.backward()
         nn.utils.clip_grad_norm_(self.critic.parameters(), self.ac_clip)

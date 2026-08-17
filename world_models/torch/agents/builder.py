@@ -78,6 +78,7 @@ def build_posterior(cfg, embed_dim, latent_size, d_model, includes_sequence_stat
         d_model,
         cfg.num_hiddens,
         cfg.hidden_dim,
+        cfg.norm,
         includes_sequence_state,
     )
 

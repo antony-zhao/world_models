@@ -143,6 +143,7 @@ class WorldModel(nn.Module):
             reward_twohot = self.reward_predictor(seq_states)
         context = {
             "obs": transformed_obs,
+            "actions": actions,
             "rewards": rewards,
             "terminated": terminated,
             "dones": dones,
@@ -178,7 +179,7 @@ class WorldModel(nn.Module):
         )
 
     def head_losses(self, reward, reward_twohot, terminated, continue_dist):
-        reward_error = -reward_twohot.log_prob(reward, aggregate=False).mean()
+        reward_error = -reward_twohot.log_prob(reward, aggregate=False).mean() * 100
         continue_error = -continue_dist.log_prob(1 - terminated.unsqueeze(-1)).mean()
         total_loss = reward_error + continue_error
         return total_loss, {

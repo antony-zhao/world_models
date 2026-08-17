@@ -41,6 +41,9 @@ class ReconstructionObjective(RepresentationObjective):
         self.weight = cfg.weight
         self.obs_type = cfg.obs_type
         self.decoder = self.build_decoder(cfg, cfg.encoder_conv_dim)
+        self.stop_grad = (
+            cfg.stop_grad
+        )  # useful for reconstructionless objectives just to verify that the model is learning
         self.use_combined_state = cfg.use_combined_state
 
     def build_decoder(self, cfg, encoder_output_dim):
@@ -63,6 +66,8 @@ class ReconstructionObjective(RepresentationObjective):
         decoder_in = (
             context["states"] if self.use_combined_state else context["latents"].flatten(-2)
         )
+        if self.stop_grad:
+            decoder_in = decoder_in.detach()
         reconstructions = self.decoder(decoder_in)
 
         if self.obs_type == "image":
@@ -82,10 +87,11 @@ class ActionObjective(RepresentationObjective):
         super().__init__(cfg)
         self.weight = cfg.weight
         self.use_seq_state = cfg.use_seq_state
+        self.action_type = cfg.action_type
         if cfg.use_seq_state:
             input_dim = cfg.embedding_dim + cfg.state_dim
         else:
-            input_dim = 2 * cfg.embedding_dim
+            input_dim = 2 * cfg.embedding_dim + cfg.state_dim
         self.action_predictor = Actor(
             input_dim,
             cfg.action_dim,
@@ -99,14 +105,23 @@ class ActionObjective(RepresentationObjective):
         )  # repurposing actor since it shares most of the same architecture
 
     def forward(self, context):
-        if self.use_seq_state:
-            first_in = context["seq_states"][:, :-1]
-        else:
-            first_in = context["obs_embeddings"][:, :-1]
-        next_in = context["obs_embeddings"][:, 1:]
-        combined_in = torch.cat([first_in, next_in], -1)
+        # if self.use_seq_state:
+        #     first_in = context["seq_states"][:, :-1]
+        # else:
+        #     first_in = context["obs_embeddings"][:, :-1]
+        # next_in = context["obs_embeddings"][:, 1:]
+        # combined_in = torch.cat([first_in, next_in], -1)
+        mask = 1 - context["terminated"][:, 1:-1].float()
+        seq_state = context["seq_states"][:, :-2]
+        first_emb = context["obs_embeddings"][:, 1:-1]
+        second_emb = context["obs_embeddings"][:, 2:]
+        combined_in = torch.cat([seq_state, first_emb, second_emb], -1)
         action_dist = self.action_predictor.policy_dist(combined_in)
-        prediction_loss = -action_dist.log_prob(context["actions"][:, :-1]).mean()
+        # targets = context["actions"][:, :-1]
+        targets = context["actions"][:, 1:-1]
+        if self.action_type == "discrete":
+            targets = targets.argmax(-1)
+        prediction_loss = -(action_dist.log_prob(targets) * mask).mean()
 
         return self.weight * prediction_loss, {
             "wm/loss/action_prediction_loss": prediction_loss.item(),
@@ -117,7 +132,7 @@ class ValueObjective(RepresentationObjective):
     def __init__(self, cfg):
         super().__init__(cfg)
         self.weight = cfg.weight
-        input_dim = cfg.latent_size + cfg.state_dim
+        input_dim = cfg.latent_size + cfg.state_dim  #
         self.value_predictor = Critic(
             input_dim,
             cfg.hidden_dim,
@@ -132,6 +147,7 @@ class ValueObjective(RepresentationObjective):
 
     def forward(self, context):
         states = make_state(context["latents"], context["seq_states"])
+        # states = context["seq_states"]
         _, value_logits = self.value_predictor(states)
         value_targets, _ = self.target(states)
         returns = compute_lambda_returns(

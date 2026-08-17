@@ -176,6 +176,7 @@ class Posterior(nn.Module):
         d_model=None,
         num_hiddens=2,
         hidden_dim=256,
+        norm="layer",
         includes_sequence_state=False,
     ):
         super().__init__()
@@ -184,7 +185,7 @@ class Posterior(nn.Module):
             in_dim = embed_dim + d_model
         else:
             in_dim = embed_dim
-        self.proj = MLP(in_dim, out_dim, hidden_dim, num_hiddens)
+        self.proj = MLP(in_dim, out_dim, hidden_dim, num_hiddens, norm=norm)
         self.dist_head = dist_head
         self.includes_sequence_state = includes_sequence_state
 

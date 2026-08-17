@@ -1,0 +1,146 @@
+# MuDreamer objective with auxiliary reconstruction (weight=0, for viz only).
+# Based on atari100k.yaml with MuDreamer-specific tweaks.
+#
+# Run: python -m world_models.torch.agents.train --config configs/atari100k_mudreamer.yaml
+
+seed: 1
+device: cuda
+num_envs: 1
+num_eval_envs: 5
+
+env:
+  game: breakout
+
+action_dim: null
+action_type: discrete
+obs_shape: null
+
+# ---- Shared model defaults
+model:
+  hidden_dim: 1024
+
+# ---- Shared symlog discretization for value/reward heads
+symlog:
+  num_bins: 255
+  low: -20.0
+  high: 20.0
+
+# ---- World model
+wm:
+  obs_type: image
+  use_combined_state: false
+  free_nats: 1.0
+
+  obj_coef: 1.0
+  dyn_coef: 0.95      # MuDreamer's β_dyn (was 0.5)
+  repr_coef: 0.05     # MuDreamer's β_rep (was 0.1)
+  head_coef: 1.0
+
+  latent:
+    num_categories: 32
+    num_codes: 32
+
+  encoder:
+    type: conv
+    filter_base: 32
+    num_convs: 4
+    kernel_size: 4
+
+  sequence_model:
+    type: transformer
+    d_model: 512
+    n_layers: 2
+    num_heads: 8
+    max_seq_len: 256
+    expand: 4
+    dropout_p: 0.1
+    use_sdpa: true
+
+  posterior:
+    num_hiddens: 1
+    unimix_prob: 0.01
+    norm: batch
+
+  prior:
+    num_hiddens: null
+    unimix_prob: 0.01
+
+  heads:
+    num_hiddens: 1
+
+  objectives:
+    - name: action_prediction
+      weight: 1.0
+      use_seq_state: False
+      num_hiddens: 1
+      actor_unimix: 0.01
+      log_std_min: -5.0
+      log_std_max: 2.0
+      std_min: 0.1
+
+    - name: value_prediction
+      weight: 1.0
+      tau: 0.01
+      gamma: 0.997
+      lambda_: 0.95
+      num_hiddens: 1
+
+    # - name: reconstruction
+    #   weight: 1.0             # auxiliary only, no training signal
+    #   obs_type: image
+    #   stop_grad: true
+    #   type: conv
+    #   filter_base: 32
+    #   num_convs: 4
+    #   kernel_size: 4
+
+# ---- Actor / critic
+actor:
+  num_hiddens: 1
+  actor_unimix: 0.01
+  log_std_min: -5.0
+  log_std_max: 2.0
+  std_min: 0.1
+
+critic:
+  num_hiddens: 1
+
+buffer:
+  num_envs: ${num_envs}
+  buffer_size: 100_000
+  prioritized: false
+
+optim:
+  wm_lr: 1.0e-4
+  ac_lr: 3.0e-5
+  eps: 1.0e-5
+  wm_clip: 1000.0
+  ac_clip: 100.0
+
+train:
+  total_env_steps: 100_000
+  prefill_steps: 1_000
+  train_every: 1
+  train_ratio: 1
+  train_ac_after: 5_000
+
+  wm_batch_size: 16
+  wm_seq_len: 64
+  ac_batch_size: 1024
+  ac_seq_len: 8
+  context_window: 16
+
+  horizon: 15         # MuDreamer's default (was 16)
+  gamma: 0.997        # MuDreamer's default (was 0.985)
+  lambda_: 0.95
+  entropy_coef: 3.0e-4
+  critic_tau: 0.02
+  returns_percentile_lo: 0.05
+  returns_percentile_hi: 0.95
+  returns_ema_tau: 0.02
+
+  log_every: 500
+  eval_every: 5_000
+  eval_episodes: 10
+  checkpoint_every: 25_000
+  log_dir: ./runs

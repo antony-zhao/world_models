@@ -16,6 +16,18 @@ def get_activation(name):
     return ACTIVATION_MAP[name.lower()]
 
 
+class BatchNorm1dReshape(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.bn = nn.BatchNorm1d(dim)
+
+    def forward(self, x):
+        *batch, D = x.shape
+        x_flat = x.reshape(-1, D)
+        x_flat = self.bn(x_flat)
+        return x_flat.view(*batch, D)
+
+
 def get_norm(name, dim):
     if name is None or name.lower() == "none":
         return nn.Identity()
@@ -24,7 +36,7 @@ def get_norm(name, dim):
     elif name.lower() == "rms":
         return nn.RMSNorm(dim, eps=1e-6)
     elif name.lower() == "batch":
-        return nn.BatchNorm1d(dim)
+        return BatchNorm1dReshape(dim)
     else:
         raise ValueError(f"Unknown norm: {name}")
 
