@@ -53,6 +53,7 @@ def preprocess_config(cfg: DictConfig) -> DictConfig:
         _set_if_missing(section, "num_codes", cfg.wm.latent.num_codes)
 
     cfg.wm.latent_size = cfg.wm.latent.num_categories * cfg.wm.latent.num_codes
+    cfg.wm.joint_state_dim = cfg.wm.latent_size + cfg.wm.sequence_model.d_model
 
     # ---- Propagate hidden_dim from model.hidden_dim ----
     hidden_dim_targets = [
@@ -88,6 +89,7 @@ def preprocess_config(cfg: DictConfig) -> DictConfig:
 
     # ---- Propagate args to each objective in the list ----
     for obj_cfg in cfg.wm.objectives:
+        _set_if_missing(obj_cfg, "joint_state_dim", cfg.wm.joint_state_dim)
         _set_if_missing(obj_cfg, "hidden_dim", cfg.model.hidden_dim)
         _set_if_missing(obj_cfg, "latent_size", cfg.wm.latent_size)
         _set_if_missing(obj_cfg, "state_dim", cfg.wm.sequence_model.d_model)

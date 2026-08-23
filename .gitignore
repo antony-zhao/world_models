@@ -87,3 +87,6 @@ ball_check.png
 Thumbs.db
 test.py
 *.zip
+
+notes/
+*.png

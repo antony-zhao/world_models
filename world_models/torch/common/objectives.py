@@ -41,9 +41,11 @@ class ReconstructionObjective(RepresentationObjective):
         self.weight = cfg.weight
         self.obs_type = cfg.obs_type
         self.decoder = self.build_decoder(cfg, cfg.encoder_conv_dim)
-        self.stop_grad = (
-            cfg.stop_grad
-        )  # useful for reconstructionless objectives just to verify that the model is learning
+        if hasattr(cfg, "stop_grad"):
+            self.stop_grad = cfg.stop_grad
+        else: 
+            self.stop_grad = False
+        # useful for reconstructionless objectives just to verify that the model is learning
         self.use_combined_state = cfg.use_combined_state
 
     def build_decoder(self, cfg, encoder_output_dim):
@@ -86,12 +88,8 @@ class ActionObjective(RepresentationObjective):
         # as it provides action information to the prediction
         super().__init__(cfg)
         self.weight = cfg.weight
-        self.use_seq_state = cfg.use_seq_state
         self.action_type = cfg.action_type
-        if cfg.use_seq_state:
-            input_dim = cfg.embedding_dim + cfg.state_dim
-        else:
-            input_dim = 2 * cfg.embedding_dim + cfg.state_dim
+        input_dim = cfg.embedding_dim + cfg.joint_state_dim
         self.action_predictor = Actor(
             input_dim,
             cfg.action_dim,
@@ -105,19 +103,13 @@ class ActionObjective(RepresentationObjective):
         )  # repurposing actor since it shares most of the same architecture
 
     def forward(self, context):
-        # if self.use_seq_state:
-        #     first_in = context["seq_states"][:, :-1]
-        # else:
-        #     first_in = context["obs_embeddings"][:, :-1]
-        # next_in = context["obs_embeddings"][:, 1:]
-        # combined_in = torch.cat([first_in, next_in], -1)
-        mask = 1 - context["terminated"][:, 1:-1].float()
+        latent = context["latents"][:, 1:-1]
         seq_state = context["seq_states"][:, :-2]
-        first_emb = context["obs_embeddings"][:, 1:-1]
-        second_emb = context["obs_embeddings"][:, 2:]
-        combined_in = torch.cat([seq_state, first_emb, second_emb], -1)
+        state = make_state(latent, seq_state)
+        next_in = context["obs_embeddings"][:, 2:]
+        combined_in = torch.cat([state, next_in], -1)
         action_dist = self.action_predictor.policy_dist(combined_in)
-        # targets = context["actions"][:, :-1]
+        mask = 1 - context["terminated"][:, 1:-1].float()
         targets = context["actions"][:, 1:-1]
         if self.action_type == "discrete":
             targets = targets.argmax(-1)
@@ -146,14 +138,13 @@ class ValueObjective(RepresentationObjective):
         self.lambda_ = cfg.lambda_
 
     def forward(self, context):
-        states = make_state(context["latents"], context["seq_states"])
-        # states = context["seq_states"]
+        states = make_state(context["latents"][:, 1:], context["seq_states"][:, :-1])
         _, value_logits = self.value_predictor(states)
         value_targets, _ = self.target(states)
         returns = compute_lambda_returns(
             value_targets.detach(),
-            context["rewards"][:, :-1],
-            1 - context["terminated"][:, :-1].float(),
+            context["rewards"][:, 1:-1],
+            1 - context["terminated"][:, 1:-1].float(),
             self.gamma,
             self.lambda_,
         )

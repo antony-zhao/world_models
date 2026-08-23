@@ -200,7 +200,7 @@ class Agent(nn.Module):
             latents, actor_seq, head_seq, actions = self.world_model.imagine(
                 None, None, self.horizon, self.actor, dones, initial_latent, initial_seq
             )
-            initial_continue = None  # need to check shapes/what to assign later
+            initial_continue = 1 - terms.flatten().float()
         else:
             context_obs, context_actions, context_terms = context
             context_actions = self._actions_to_model_input(context_actions)

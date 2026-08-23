@@ -125,4 +125,4 @@ train:
   eval_every: 5_000
   eval_episodes: 10
   checkpoint_every: 25_000
-  log_dir: ./runs
+  log_dir: ./runs/atari100k

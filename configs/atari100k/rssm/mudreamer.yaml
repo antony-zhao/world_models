@@ -1,0 +1,133 @@
+# configs/atari100k_mudreamer_rssm.yaml
+# MuDreamer with RSSM sequence model — sanity check that objectives work.
+
+seed: 1
+device: cuda
+num_envs: 1
+num_eval_envs: 5
+
+env:
+  game: pong
+
+action_dim: null
+action_type: discrete
+obs_shape: null
+
+model:
+  hidden_dim: 1024
+
+symlog:
+  num_bins: 255
+  low: -20.0
+  high: 20.0
+
+wm:
+  obs_type: image
+  use_combined_state: false
+  free_nats: 1.0
+
+  obj_coef: 1.0
+  dyn_coef: 0.95
+  repr_coef: 0.05
+  reward_coef: 100.0     # MuDreamer's reward scale
+  continue_coef: 1.0
+  head_coef: 1.0         # kept for other loss aggregation if needed
+
+  latent:
+    num_categories: 32
+    num_codes: 32
+
+  encoder:
+    type: conv
+    filter_base: 32
+    num_convs: 4
+    kernel_size: 4
+
+  sequence_model:
+    type: rssm
+    d_model: 512          # deterministic size (h)
+    hidden_dim: 512       # RSSM internal MLP hidden size
+    n_layers: 1           # or 2 depending on your RSSM's expected structure
+    use_block_linear: false   # or true if you have block-linear GRU
+
+  posterior:
+    num_hiddens: null
+    unimix_prob: 0.01
+    norm: batch           # BN required for MuDreamer
+
+  prior:
+    num_hiddens: null
+    unimix_prob: 0.01
+    norm: layer
+
+  heads:
+    num_hiddens: 1
+
+  objectives:
+    - name: action_prediction
+      weight: 1.0
+      use_seq_state: true   # RSSM: h_{t-1} doesn't leak a_{t-1}, safe to use
+      num_hiddens: 1
+      actor_unimix: 0.01
+      log_std_min: -5.0
+      log_std_max: 2.0
+      std_min: 0.1
+
+    - name: value_prediction
+      weight: 1.0
+      tau: 0.01
+      gamma: 0.997
+      lambda_: 0.95
+      num_hiddens: 1
+
+    # No reconstruction — pure MuDreamer test
+
+actor:
+  num_hiddens: 1
+  actor_unimix: 0.01
+  log_std_min: -5.0
+  log_std_max: 2.0
+  std_min: 0.1
+
+critic:
+  num_hiddens: 1
+
+buffer:
+  num_envs: ${num_envs}
+  buffer_size: 100_000
+  prioritized: false
+
+optim:
+  wm_lr: 1.0e-4
+  ac_lr: 3.0e-5
+  eps: 1.0e-8
+  wm_clip: 1000.0
+  ac_clip: 100.0
+
+train:
+  total_env_steps: 100_000
+  prefill_steps: 1_000
+  train_every: 1
+  train_ratio: 1
+  train_ac_after: 10_000
+
+  wm_batch_size: 16
+  wm_seq_len: 64
+  ac_batch_size: 1024
+  ac_seq_len: 8
+  context_window: 16    # unused for RSSM
+
+  horizon: 15
+  gamma: 0.997
+  lambda_: 0.95
+  entropy_coef: 3.0e-4
+  critic_tau: 0.02
+  returns_percentile_lo: 0.05
+  returns_percentile_hi: 0.95
+  returns_ema_tau: 0.02
+
+  log_every: 500
+  eval_every: 5_000
+  eval_episodes: 10
+  checkpoint_every: 25_000
+  log_dir: ./runs/atari100k

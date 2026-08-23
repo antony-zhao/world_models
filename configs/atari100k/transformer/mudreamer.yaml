@@ -9,7 +9,7 @@ num_envs: 1
 num_eval_envs: 5
 
 env:
-  game: breakout
+  game: pong
 
 action_dim: null
 action_type: discrete
@@ -71,7 +71,6 @@ wm:
   objectives:
     - name: action_prediction
       weight: 1.0
-      use_seq_state: False
       num_hiddens: 1
       actor_unimix: 0.01
       log_std_min: -5.0
@@ -143,4 +142,4 @@ train:
   eval_every: 5_000
   eval_episodes: 10
   checkpoint_every: 25_000
-  log_dir: ./runs
+  log_dir: ./runs/atari100k

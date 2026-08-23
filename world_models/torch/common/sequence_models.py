@@ -97,8 +97,8 @@ class RSSM(SequenceModel):
         d_model,
         hidden_dim=512,
         n_layers=2,
-        act=nn.SiLU,
         use_block_linear=True,
+        act=nn.SiLU,
     ):
         super().__init__()
         in_proj = nn.Linear(d_model + latent_size + action_dim, hidden_dim * 3, bias=False)

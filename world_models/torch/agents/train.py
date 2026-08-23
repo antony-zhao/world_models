@@ -166,7 +166,10 @@ def main(cfg_path: str, overrides: list[str] = None):
     # ---- output dir + logger
     # Use safe filename: replace / in env IDs like ALE/Pong-v5
     game_safe = cfg.env.game.replace("/", "-")
-    run_name = f"{game_safe}_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    config_stem = Path(cfg_path).stem  # "dreamer"
+    config_parent = Path(cfg_path).parent.name  # "rssm"
+    run_name = f"{config_parent}_{config_stem}_{game_safe}_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    log_dir = Path(cfg.train.log_dir) / run_name
     log_dir = Path(cfg.train.log_dir) / run_name
     log_dir.mkdir(parents=True, exist_ok=True)
     OmegaConf.save(cfg, log_dir / "config.yaml")
