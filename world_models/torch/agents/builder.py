@@ -41,6 +41,7 @@ def build_sequence_model(cfg, latent_size, action_dim):
             cfg.hidden_dim,
             cfg.n_layers,
             cfg.use_block_linear,
+            norm=cfg.norm,
         )
     elif cfg.type == "mamba":
         return MambaSequenceModel(
@@ -52,6 +53,7 @@ def build_sequence_model(cfg, latent_size, action_dim):
             cfg.d_conv,
             cfg.expand,
             cfg.headdim,
+            norm=cfg.norm,
         )
     elif cfg.type == "transformer":
         return TransformerSequenceModel(
@@ -64,6 +66,7 @@ def build_sequence_model(cfg, latent_size, action_dim):
             expand=cfg.expand,
             dropout_p=cfg.dropout_p,
             use_sdpa=cfg.use_sdpa,
+            norm=cfg.norm,
         )
     else:
         raise NotImplementedError

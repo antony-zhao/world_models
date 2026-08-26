@@ -5,7 +5,7 @@ from mamba_ssm.utils.generation import InferenceParams
 from torch import Tensor, nn
 
 from world_models.torch.common.models import MLP, DreamerGRU, MambaBlock, TransformerBlock
-from world_models.torch.common.utils import make_state
+from world_models.torch.common.utils import get_norm, make_state
 
 
 class SequenceModel(nn.Module, ABC):
@@ -99,10 +99,11 @@ class RSSM(SequenceModel):
         n_layers=2,
         use_block_linear=True,
         act=nn.SiLU,
+        norm="layer",
     ):
         super().__init__()
         in_proj = nn.Linear(d_model + latent_size + action_dim, hidden_dim * 3, bias=False)
-        norm = nn.RMSNorm(hidden_dim * 3, eps=1e-6)
+        norm = get_norm(norm, hidden_dim * 3)
         act_fn = act()
         mlp = MLP(
             hidden_dim * 3,
@@ -210,6 +211,7 @@ class MambaSequenceModel(SequenceModel):
         expand=2,
         headdim=64,
         act=nn.SiLU,
+        norm="layer",
     ):
         super().__init__()
         in_proj = nn.Linear(latent_size + action_dim, d_model, bias=False)
@@ -218,7 +220,7 @@ class MambaSequenceModel(SequenceModel):
         self.blocks = nn.ModuleList(
             [MambaBlock(d_model, i, d_state, d_conv, expand, headdim) for i in range(n_layers)]
         )
-        self.norm_f = nn.RMSNorm(d_model, eps=1e-6)
+        self.norm_f = get_norm(norm, d_model)
         self.d_model = d_model
 
     @property
@@ -274,6 +276,7 @@ class TransformerSequenceModel(SequenceModel):
         dropout_p=0.0,
         act=nn.SiLU,
         use_sdpa=True,
+        norm="layer",
     ):
         super().__init__()
         in_proj = nn.Linear(latent_size + action_dim, d_model, bias=False)
@@ -287,7 +290,7 @@ class TransformerSequenceModel(SequenceModel):
                 for _ in range(n_layers)
             ]
         )
-        self.norm_f = nn.RMSNorm(d_model, eps=1e-6)
+        self.norm_f = get_norm(norm, d_model)
         self.d_model = d_model
         self.n_layers = n_layers
         self.max_seq_len = max_seq_len

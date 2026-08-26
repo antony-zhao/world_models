@@ -47,7 +47,7 @@ wm:
     d_model: 512
     hidden_dim: 512
     n_layers: 1
-    use_block_linear: false
+    use_block_linear: true
 
   posterior:
     num_hiddens: null

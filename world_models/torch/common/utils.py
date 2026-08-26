@@ -22,10 +22,12 @@ class BatchNorm1dReshape(nn.Module):
         self.bn = nn.BatchNorm1d(dim)
 
     def forward(self, x):
-        *batch, D = x.shape
-        x_flat = x.reshape(-1, D)
-        x_flat = self.bn(x_flat)
-        return x_flat.view(*batch, D)
+        if x.dim() == 3:
+            x = x.permute(0, 2, 1)
+        x = self.bn(x)
+        if x.dim() == 3:
+            x = x.permute(0, 2, 1)
+        return x
 
 
 def get_norm(name, dim):

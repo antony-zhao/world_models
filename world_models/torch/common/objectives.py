@@ -43,7 +43,7 @@ class ReconstructionObjective(RepresentationObjective):
         self.decoder = self.build_decoder(cfg, cfg.encoder_conv_dim)
         if hasattr(cfg, "stop_grad"):
             self.stop_grad = cfg.stop_grad
-        else: 
+        else:
             self.stop_grad = False
         # useful for reconstructionless objectives just to verify that the model is learning
         self.use_combined_state = cfg.use_combined_state
@@ -103,17 +103,21 @@ class ActionObjective(RepresentationObjective):
         )  # repurposing actor since it shares most of the same architecture
 
     def forward(self, context):
-        latent = context["latents"][:, 1:-1]
-        seq_state = context["seq_states"][:, :-2]
+        # latent = context["latents"][:, 1:-1]
+        # seq_state = context["seq_states"][:, :-2]
+        latent = context["latents"][:, :-1]
+        seq_state = context["seq_states"][:, :-1]
         state = make_state(latent, seq_state)
-        next_in = context["obs_embeddings"][:, 2:]
+        next_in = context["obs_embeddings"][:, 1:]  # [:, 2:]
         combined_in = torch.cat([state, next_in], -1)
         action_dist = self.action_predictor.policy_dist(combined_in)
-        mask = 1 - context["terminated"][:, 1:-1].float()
-        targets = context["actions"][:, 1:-1]
+        # mask = 1 - context["terminated"][:, 1:-1].float()
+        # targets = context["actions"][:, 1:-1]
+        mask = 1 - context["terminated"][:, :-1].float()
+        targets = context["actions"][:, :-1]
         if self.action_type == "discrete":
             targets = targets.argmax(-1)
-        prediction_loss = -(action_dist.log_prob(targets) * mask).mean()
+        prediction_loss = -(action_dist.log_prob(targets) * mask).sum() / mask.sum()
 
         return self.weight * prediction_loss, {
             "wm/loss/action_prediction_loss": prediction_loss.item(),
@@ -124,7 +128,7 @@ class ValueObjective(RepresentationObjective):
     def __init__(self, cfg):
         super().__init__(cfg)
         self.weight = cfg.weight
-        input_dim = cfg.latent_size + cfg.state_dim  #
+        input_dim = cfg.latent_size + cfg.state_dim 
         self.value_predictor = Critic(
             input_dim,
             cfg.hidden_dim,
@@ -138,13 +142,15 @@ class ValueObjective(RepresentationObjective):
         self.lambda_ = cfg.lambda_
 
     def forward(self, context):
-        states = make_state(context["latents"][:, 1:], context["seq_states"][:, :-1])
+        states = make_state(
+            context["latents"], context["seq_states"]
+        )  # make_state(context["latents"][:, 1:], context["seq_states"][:, :-1])
         _, value_logits = self.value_predictor(states)
         value_targets, _ = self.target(states)
         returns = compute_lambda_returns(
             value_targets.detach(),
-            context["rewards"][:, 1:-1],
-            1 - context["terminated"][:, 1:-1].float(),
+            context["rewards"][:, :-1],  # [:, 1:-1],
+            1 - context["terminated"][:, :-1].float(),  # [:, 1:-1].float(),
             self.gamma,
             self.lambda_,
         )

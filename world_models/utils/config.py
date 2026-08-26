@@ -107,5 +107,6 @@ def preprocess_config(cfg: DictConfig) -> DictConfig:
     # ---- Set posterior/prior norm defaults ----
     _set_if_missing(cfg.wm.posterior, "norm", "layer")
     _set_if_missing(cfg.wm.prior, "norm", "layer")
+    _set_if_missing(cfg.wm.sequence_model, "norm", "layer")
 
     return cfg

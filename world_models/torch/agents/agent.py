@@ -80,6 +80,7 @@ class Agent(nn.Module):
         self.step_count = 0
 
     def act(self, obs, det=False):
+        self.world_model.eval()
         if self.is_rssm:
             obs_tensor = torch.from_numpy(obs).float().to(self.device)
             done_tensor = self.prev_done.float().unsqueeze(-1)
@@ -101,6 +102,7 @@ class Agent(nn.Module):
         else:
             self.action_history.append(processed_actions)
         action = to_numpy(action)
+        self.world_model.train()
 
         return action
 
@@ -120,6 +122,7 @@ class Agent(nn.Module):
             )
 
     def eval_act(self, obs, det=True, dones=None):
+        self.world_model.eval()
         if dones is None:
             dones = np.zeros(self.num_eval_envs, dtype=bool)
 

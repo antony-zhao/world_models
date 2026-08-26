@@ -48,10 +48,10 @@ wm:
     d_model: 512          # deterministic size (h)
     hidden_dim: 512       # RSSM internal MLP hidden size
     n_layers: 1           # or 2 depending on your RSSM's expected structure
-    use_block_linear: false   # or true if you have block-linear GRU
+    use_block_linear: true   # or true if you have block-linear GRU
 
   posterior:
-    num_hiddens: null
+    num_hiddens: 1
     unimix_prob: 0.01
     norm: batch           # BN required for MuDreamer
 
@@ -109,7 +109,7 @@ train:
   prefill_steps: 1_000
   train_every: 1
   train_ratio: 1
-  train_ac_after: 10_000
+  train_ac_after: 5_000
 
   wm_batch_size: 16
   wm_seq_len: 64

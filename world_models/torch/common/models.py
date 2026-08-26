@@ -199,9 +199,9 @@ class Posterior(nn.Module):
 
 
 class Prior(nn.Module):
-    def __init__(self, d_model, out_dim, dist_head, num_hiddens=2, hidden_dim=256):
+    def __init__(self, d_model, out_dim, dist_head, num_hiddens=2, hidden_dim=256, norm="layer"):
         super().__init__()
-        self.proj = MLP(d_model, out_dim, hidden_dim, num_hiddens)
+        self.proj = MLP(d_model, out_dim, hidden_dim, num_hiddens, norm=norm)
         self.dist_head = dist_head
 
     def forward(self, sequence_state):
@@ -402,11 +402,11 @@ class TransformerBlock(nn.Module):
         self.dropout = dropout
         self.causal = is_causal
 
-        self.rms1 = get_norm(norm, d_model)
+        self.norm1 = get_norm(norm, d_model)
         self.qkv = nn.Linear(d_model, d_model * 3, bias=False)
         self.out_proj = nn.Linear(d_model, d_model, bias=False)
 
-        self.rms2 = get_norm(norm, d_model)
+        self.norm2 = get_norm(norm, d_model)
         self.ff = TransformerFFNetwork(d_model, expand, dropout, act)
 
         self.rope = RotaryEmbedding(self.head_dim, max_seq_len=max_seq_len)
@@ -433,7 +433,7 @@ class TransformerBlock(nn.Module):
         return torch.matmul(attn, v)
 
     def forward(self, x, cache=None, seq_offset=0):
-        h = self.rms1(x)
+        h = self.norm1(x)
         B, T, _ = h.shape
 
         # Compute Q, K, V
@@ -492,7 +492,7 @@ class TransformerBlock(nn.Module):
         attn = attn.transpose(1, 2).contiguous().view(B, T, self.d_model)
         attn = self.out_proj(attn)
         x = x + attn
-        x = x + self.ff(self.rms2(x))
+        x = x + self.ff(self.norm2(x))
 
         return x, new_cache
 

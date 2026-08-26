@@ -168,7 +168,9 @@ def main(cfg_path: str, overrides: list[str] = None):
     game_safe = cfg.env.game.replace("/", "-")
     config_stem = Path(cfg_path).stem  # "dreamer"
     config_parent = Path(cfg_path).parent.name  # "rssm"
-    run_name = f"{config_parent}_{config_stem}_{game_safe}_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    run_name = (
+        f"{config_parent}_{config_stem}_{game_safe}_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    )
     log_dir = Path(cfg.train.log_dir) / run_name
     log_dir = Path(cfg.train.log_dir) / run_name
     log_dir.mkdir(parents=True, exist_ok=True)
