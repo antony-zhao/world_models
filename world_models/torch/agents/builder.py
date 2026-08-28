@@ -162,6 +162,8 @@ def build_world_model(cfg, action_dim) -> WorldModel:
         cfg.dyn_coef,
         cfg.repr_coef,
         cfg.head_coef,
+        cfg.reward_coef,
+        cfg.continue_coef,
         cfg.free_nats,
         cfg.use_combined_state,
     )

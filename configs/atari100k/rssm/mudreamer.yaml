@@ -23,7 +23,7 @@ symlog:
 
 wm:
   obs_type: image
-  use_combined_state: false
+  use_combined_state: true
   free_nats: 1.0
 
   obj_coef: 1.0
@@ -106,7 +106,7 @@ optim:
 
 train:
   total_env_steps: 100_000
-  prefill_steps: 1_000
+  prefill_steps: 100
   train_every: 1
   train_ratio: 1
   train_ac_after: 5_000

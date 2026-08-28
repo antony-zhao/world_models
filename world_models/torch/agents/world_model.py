@@ -23,6 +23,8 @@ class WorldModel(nn.Module):
         dyn_coef=0.5,
         repr_coef=0.1,
         head_coef=1.0,
+        reward_coef=1.0,
+        continue_coef=1.0,
         free_nats=1.0,
         use_combined_state=False,
     ):
@@ -41,6 +43,8 @@ class WorldModel(nn.Module):
         self.dyn_coef = dyn_coef
         self.repr_coef = repr_coef
         self.head_coef = head_coef
+        self.reward_coef = reward_coef
+        self.continue_coef = continue_coef
         self.free_nats = free_nats
 
     def initial_state(self, batch_size, device):
@@ -179,8 +183,10 @@ class WorldModel(nn.Module):
         )
 
     def head_losses(self, reward, reward_twohot, terminated, continue_dist):
-        reward_error = -reward_twohot.log_prob(reward, aggregate=False).mean() * 100
-        continue_error = -continue_dist.log_prob(1 - terminated.unsqueeze(-1)).mean()
+        reward_error = -reward_twohot.log_prob(reward, aggregate=False).mean() * self.reward_coef
+        continue_error = (
+            -continue_dist.log_prob(1 - terminated.unsqueeze(-1)).mean() * self.continue_coef
+        )
         total_loss = reward_error + continue_error
         return total_loss, {
             "wm/loss/reward_loss": to_numpy(reward_error),

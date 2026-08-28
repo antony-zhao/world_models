@@ -128,7 +128,7 @@ class ValueObjective(RepresentationObjective):
     def __init__(self, cfg):
         super().__init__(cfg)
         self.weight = cfg.weight
-        input_dim = cfg.latent_size + cfg.state_dim 
+        input_dim = cfg.latent_size + cfg.state_dim
         self.value_predictor = Critic(
             input_dim,
             cfg.hidden_dim,
@@ -154,9 +154,12 @@ class ValueObjective(RepresentationObjective):
             self.gamma,
             self.lambda_,
         )
+        mask = 1 - context["terminated"][:, :-1].float()
         value_loss = (
-            -self.value_predictor.make_dist(value_logits[:, :-1]).log_prob(returns.detach())
-        ).mean()
+            -self.value_predictor.make_dist(value_logits[:, :-1]).log_prob(
+                returns.detach()
+            )  # * mask
+        ).mean()  # .sum() / mask.sum()
         return value_loss * self.weight, {"wm/loss/value_prediction_loss": value_loss.item()}
 
     def step(self):
