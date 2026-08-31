@@ -102,7 +102,6 @@ class Agent(nn.Module):
         else:
             self.action_history.append(processed_actions)
         action = to_numpy(action)
-        self.world_model.train()
 
         return action
 
@@ -162,6 +161,7 @@ class Agent(nn.Module):
             self.prev_done = torch.tensor(terminated | truncated).to(self.device)
 
     def train_step(self):
+        self.world_model.train()
         obs, actions, rewards, terms, truncs = self.buffer.sample_as_tensors(
             self.device, self.wm_batch_size, self.wm_seq_len
         )

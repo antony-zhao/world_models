@@ -27,7 +27,7 @@ wm:
   free_nats: 1.0
 
   obj_coef: 1.0
-  dyn_coef: 0.95
+  dyn_coef: 1.0
   repr_coef: 0.05
   reward_coef: 100.0     # MuDreamer's reward scale
   continue_coef: 1.0
@@ -47,11 +47,11 @@ wm:
     type: rssm
     d_model: 512          # deterministic size (h)
     hidden_dim: 512       # RSSM internal MLP hidden size
-    n_layers: 1           # or 2 depending on your RSSM's expected structure
+    n_layers: 0           # or 2 depending on your RSSM's expected structure
     use_block_linear: true   # or true if you have block-linear GRU
 
   posterior:
-    num_hiddens: 1
+    num_hiddens: 0
     unimix_prob: 0.01
     norm: batch           # BN required for MuDreamer
 
@@ -61,13 +61,13 @@ wm:
     norm: layer
 
   heads:
-    num_hiddens: 1
+    num_hiddens: 0
 
   objectives:
     - name: action_prediction
       weight: 1.0
       use_seq_state: true   # RSSM: h_{t-1} doesn't leak a_{t-1}, safe to use
-      num_hiddens: 1
+      num_hiddens: 0
       actor_unimix: 0.01
       log_std_min: -5.0
       log_std_max: 2.0
@@ -78,7 +78,7 @@ wm:
       tau: 0.01
       gamma: 0.997
       lambda_: 0.95
-      num_hiddens: 1
+      num_hiddens: 0
 
     # No reconstruction — pure MuDreamer test
 
