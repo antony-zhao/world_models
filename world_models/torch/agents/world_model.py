@@ -31,6 +31,7 @@ class WorldModel(nn.Module):
         super().__init__()
         self.encoder = encoder
         self.sequence_model = sequence_model
+        self.rssm = isinstance(self.sequence_model, RSSM)
         self.posterior = posterior
         self.prior = prior
         self.continue_predictor = continue_predictor
@@ -55,7 +56,7 @@ class WorldModel(nn.Module):
         # action should be preprocessed into one_hot before being passed here
         # takes in x_t, a_{t-1}, z_{t-1}
         # returns the latent (z_t), seq_state (h_t)
-        if not isinstance(self.sequence_model, RSSM):
+        if not self.rssm:
             raise TypeError(
                 f"step_obs_rssm requires RSSM, got {type(self.sequence_model).__name__}"
             )
@@ -76,7 +77,7 @@ class WorldModel(nn.Module):
     def step_obs_window(self, obs_window, action_window, det=False):
         # Passes in a sequence of obs (o_{t-l}-o_t)
         # and actions (a_{t-l}-a_{t-1})
-        if isinstance(self.sequence_model, RSSM):
+        if self.rssm:
             raise TypeError("step_obs_window is for Mamba/Transformer; use step_obs_rssm for RSSM")
         transformed_obs = transform_obs(obs_window, self.is_image)
         obs_embedding = self.encoder(transformed_obs)
@@ -102,7 +103,7 @@ class WorldModel(nn.Module):
         self.eval()
         actor.eval()
 
-        if isinstance(self.sequence_model, RSSM):
+        if self.rssm:
             if initial_latent is None or initial_seq is None:
                 transformed = transform_obs(context_obs, self.is_image)
                 embeddings = self.encoder(transformed)
@@ -137,12 +138,14 @@ class WorldModel(nn.Module):
         latents, seq_states, post_logits, prior_logits = self.sequence_model.rollout(
             obs_embeddings, actions, self.posterior, self.prior, dones
         )
-        if self.use_combined_state:
+        if self.rssm:
             states = make_state(latents, seq_states)
+        else:
+            states = make_state(latents[:, 1:], seq_states[:, :-1])  # (z_{1-T}, d_{0-T-1})
+        if self.use_combined_state:
             continue_dist = self.continue_predictor(states)
             reward_twohot = self.reward_predictor(states)
         else:
-            states = None
             continue_dist = self.continue_predictor(seq_states)
             reward_twohot = self.reward_predictor(seq_states)
         context = {

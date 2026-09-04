@@ -33,7 +33,7 @@ class ConvEncoder(nn.Module):
                     bias=i == len(filters) - 1,
                 )
             )
-            if i < len(filters) - 1:
+            if i < len(filters):
                 layers.append(ChannelNorm(norm, filter))
                 layers.append(act())
         self.layers = nn.Sequential(*layers)

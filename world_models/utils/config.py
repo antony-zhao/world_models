@@ -93,6 +93,7 @@ def preprocess_config(cfg: DictConfig) -> DictConfig:
         _set_if_missing(obj_cfg, "hidden_dim", cfg.model.hidden_dim)
         _set_if_missing(obj_cfg, "latent_size", cfg.wm.latent_size)
         _set_if_missing(obj_cfg, "state_dim", cfg.wm.sequence_model.d_model)
+        _set_if_missing(obj_cfg, "type", cfg.wm.sequence_model.type)
         _set_if_missing(obj_cfg, "use_combined_state", cfg.wm.use_combined_state)
         _set_if_missing(obj_cfg, "action_dim", cfg.action_dim)
         _set_if_missing(obj_cfg, "action_type", cfg.action_type)

@@ -31,10 +31,14 @@ class Agent(nn.Module):
         self.buffer = build_buffer(cfg.buffer)
 
         self.optim_wm = optim.Adam(
-            self.world_model.parameters(), cfg.optim.wm_lr, eps=cfg.optim.eps
+            self.world_model.parameters(), cfg.optim.wm_lr, eps=cfg.optim.wm_eps
         )
-        self.optim_actor = optim.Adam(self.actor.parameters(), cfg.optim.ac_lr, eps=cfg.optim.eps)
-        self.optim_critic = optim.Adam(self.critic.parameters(), cfg.optim.ac_lr, eps=cfg.optim.eps)
+        self.optim_actor = optim.Adam(
+            self.actor.parameters(), cfg.optim.ac_lr, eps=cfg.optim.ac_eps
+        )
+        self.optim_critic = optim.Adam(
+            self.critic.parameters(), cfg.optim.ac_lr, eps=cfg.optim.ac_eps
+        )
 
         if self.is_rssm:
             self.model_state = self.world_model.initial_state(cfg.num_envs, cfg.device)
@@ -197,7 +201,7 @@ class Agent(nn.Module):
 
     def _train_actor_critic(self, context):
         if self.is_rssm:
-            initial_latent, initial_seq, dones, terms = context
+            initial_latent, initial_seq, terms, dones = context
             initial_latent = initial_latent.flatten(0, 1)
             initial_seq = initial_seq.flatten(0, 1)
             latents, actor_seq, head_seq, actions = self.world_model.imagine(

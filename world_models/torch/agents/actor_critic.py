@@ -85,13 +85,13 @@ class Critic(nn.Module):
         self, input_dim, hidden_dim, num_hiddens, num_bins, bin_low, bin_high, act=nn.SiLU
     ):
         super().__init__()
-        self.mlp = MLP(input_dim, hidden_dim, hidden_dim, num_hiddens - 1, act=act)
-        self.twohot = TwoHotHead(hidden_dim, num_bins, bin_low, bin_high, hidden_dim, None)
+        self.twohot = TwoHotHead(
+            input_dim, num_bins, bin_low, bin_high, hidden_dim, num_hiddens, act=act
+        )
         self.twohot.zero_init()
 
     def forward(self, x):
-        logits = self.mlp(x)
-        twohot = self.twohot(logits)
+        twohot = self.twohot(x)
         return twohot.mean(), twohot.logits
 
     def make_dist(self, logits):

@@ -148,8 +148,7 @@ class RSSM(SequenceModel):
             post_dist = posterior(embeddings[:, i], hidden)  # z_t = q(x_t, h_t)
             latent = post_dist.rsample()
 
-            if i > 0:
-                post_logits.append(post_dist.logits)
+            post_logits.append(post_dist.logits)
 
             latents.append(latent)
             hiddens.append(hidden)
@@ -162,15 +161,15 @@ class RSSM(SequenceModel):
                 ) * hidden + done * initial_hidden  # update for episode boundaries
 
         return (
-            torch.stack(latents, 1),
-            torch.stack(hiddens, 1),
+            torch.stack(latents, 1),  # z_t
+            torch.stack(hiddens, 1),  # h_t
             torch.stack(post_logits, 1),
         )
 
     def rollout(self, embeddings, actions, posterior, prior, dones=None):
         # returns (latents, states, posterior_dists, prior_dists),
         latents, hiddens, post_logits = self.step_through(embeddings, actions, posterior, dones)
-        prior_logits = prior(hiddens[:, 1:]).logits
+        prior_logits = prior(hiddens).logits
 
         return latents, hiddens, post_logits, prior_logits
 

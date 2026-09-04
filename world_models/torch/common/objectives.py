@@ -82,13 +82,10 @@ class ReconstructionObjective(RepresentationObjective):
 
 class ActionObjective(RepresentationObjective):
     def __init__(self, cfg):
-        # Original MuDreamer uses x_t and s_{t-1} for rssm,
-        # for the transformer/mamba we use x_t and x_{t-1}
-        # This specifically does mean to not use seq_state for transformer/mamba,
-        # as it provides action information to the prediction
         super().__init__(cfg)
         self.weight = cfg.weight
         self.action_type = cfg.action_type
+        self.rssm = cfg.type == "rssm"
         input_dim = cfg.embedding_dim + cfg.joint_state_dim
         self.action_predictor = Actor(
             input_dim,
@@ -103,18 +100,17 @@ class ActionObjective(RepresentationObjective):
         )  # repurposing actor since it shares most of the same architecture
 
     def forward(self, context):
-        # latent = context["latents"][:, 1:-1]
-        # seq_state = context["seq_states"][:, :-2]
-        latent = context["latents"][:, :-1]
-        seq_state = context["seq_states"][:, :-1]
-        state = make_state(latent, seq_state)
-        next_in = context["obs_embeddings"][:, 1:]  # [:, 2:]
-        combined_in = torch.cat([state, next_in], -1)
+        states = context["states"][:, :-1]  # rssm has (B, T-1), transformer has (B, 1:T-1)
+        if self.rssm:
+            next_in = context["obs_embeddings"][:, 1:]
+            mask = 1 - context["terminated"][:, :-1].float()
+            targets = context["actions"][:, :-1]
+        else:
+            next_in = context["obs_embeddings"][:, 2:]
+            mask = 1 - context["terminated"][:, 1:-1].float()
+            targets = context["actions"][:, 1:-1]
+        combined_in = torch.cat([states, next_in], -1)
         action_dist = self.action_predictor.policy_dist(combined_in)
-        # mask = 1 - context["terminated"][:, 1:-1].float()
-        # targets = context["actions"][:, 1:-1]
-        mask = 1 - context["terminated"][:, :-1].float()
-        targets = context["actions"][:, :-1]
         if self.action_type == "discrete":
             targets = targets.argmax(-1)
         prediction_loss = -(action_dist.log_prob(targets) * mask).sum() / mask.sum()
@@ -128,6 +124,7 @@ class ValueObjective(RepresentationObjective):
     def __init__(self, cfg):
         super().__init__(cfg)
         self.weight = cfg.weight
+        self.rssm = cfg.type == "rssm"
         input_dim = cfg.latent_size + cfg.state_dim
         self.value_predictor = Critic(
             input_dim,
@@ -142,19 +139,23 @@ class ValueObjective(RepresentationObjective):
         self.lambda_ = cfg.lambda_
 
     def forward(self, context):
-        states = make_state(
-            context["latents"], context["seq_states"]
-        )  # make_state(context["latents"][:, 1:], context["seq_states"][:, :-1])
+        states = context["states"]
+        if self.rssm:
+            rewards = context["rewards"][:, :-1]
+            terminated = context["terminated"][:, :-1]
+        else:
+            rewards = context["rewards"][:, 1:-1]
+            terminated = context["terminated"][:, 1:-1]
         _, value_logits = self.value_predictor(states)
         value_targets, _ = self.target(states)
         returns = compute_lambda_returns(
             value_targets.detach(),
-            context["rewards"][:, :-1],  # [:, 1:-1],
-            1 - context["terminated"][:, :-1].float(),  # [:, 1:-1].float(),
+            rewards,
+            terminated,
             self.gamma,
             self.lambda_,
         )
-        mask = 1 - context["terminated"][:, :-1].float()
+        # mask = 1 - context["terminated"][:, :-1].float()
         value_loss = (
             -self.value_predictor.make_dist(value_logits[:, :-1]).log_prob(
                 returns.detach()
