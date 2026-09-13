@@ -235,10 +235,15 @@ class DreamerGRU(nn.Module):
             self.layer = BlockLinear(hidden_state_size, hidden_state_size * 3)
         else:
             self.layer = nn.Linear(hidden_state_size, hidden_state_size * 3)
+        # DreamerV3's GRU cell LayerNorms the gate pre-activations for stability;
+        # this was missing here, which let the RSSM's hidden state grow unbounded
+        # on harder-dynamics games (see the Boxing KL-divergence blowup).
+        self.norm = get_norm("layer", hidden_state_size * 3)
         self.hidden_state_size = hidden_state_size
 
     def forward(self, x, h):
         x = self.layer(x)
+        x = self.norm(x)
         reset, cand, update = torch.split(x, self.hidden_state_size, -1)
         reset = F.sigmoid(reset)
         cand = F.tanh(reset * cand)

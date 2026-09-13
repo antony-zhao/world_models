@@ -143,8 +143,9 @@ class WorldModel(nn.Module):
         else:
             states = make_state(latents[:, 1:], seq_states[:, :-1])  # (z_{1-T}, d_{0-T-1})
         if self.use_combined_state:
-            continue_dist = self.continue_predictor(states)
-            reward_twohot = self.reward_predictor(states)
+            head_states = make_state(latents, seq_states)
+            continue_dist = self.continue_predictor(head_states)
+            reward_twohot = self.reward_predictor(head_states)
         else:
             continue_dist = self.continue_predictor(seq_states)
             reward_twohot = self.reward_predictor(seq_states)

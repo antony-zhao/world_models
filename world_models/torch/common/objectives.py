@@ -151,7 +151,7 @@ class ValueObjective(RepresentationObjective):
         returns = compute_lambda_returns(
             value_targets.detach(),
             rewards,
-            terminated,
+            1 - terminated.float(),
             self.gamma,
             self.lambda_,
         )

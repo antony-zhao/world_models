@@ -29,7 +29,7 @@ wm:
   obj_coef: 1.0
   dyn_coef: 0.95
   repr_coef: 0.05
-  reward_coef: 100.0     # MuDreamer's reward scale
+  reward_coef: 1.0     # MuDreamer's reward scale
   continue_coef: 1.0
   head_coef: 1.0         # kept for other loss aggregation if needed
 
@@ -48,7 +48,7 @@ wm:
     d_model: 512          # deterministic size (h)
     hidden_dim: 512       # RSSM internal MLP hidden size
     n_layers: null           # or 2 depending on your RSSM's expected structure
-    use_block_linear: true   # or true if you have block-linear GRU
+    use_block_linear: false   # or true if you have block-linear GRU
 
   posterior:
     num_hiddens: 0

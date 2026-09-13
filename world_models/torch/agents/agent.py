@@ -219,7 +219,7 @@ class Agent(nn.Module):
             make_state(latents, head_seq) if self.world_model.use_combined_state else head_seq
         )
         reward_pred = self.world_model.reward_predictor(head_state).mean().detach()
-        continue_pred = self.world_model.continue_predictor(head_state).mean.squeeze(-1).detach()
+        continue_pred = self.world_model.continue_predictor(head_state).mode.squeeze(-1).detach()
         continue_pred[:, 0] = initial_continue
         weights = torch.cumprod(continue_pred * self.gamma, 1).detach() / self.gamma
         actor_state = make_state(latents, actor_seq).detach()

@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from typing import Tuple
 
 import torch
 from mamba_ssm.utils.generation import InferenceParams
@@ -32,7 +33,7 @@ class SequenceModel(nn.Module, ABC):
 
     def rollout(
         self, embeddings, actions, posterior, prior, dones=None
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
         # returns (latents, states, posterior_dists, prior_dists),
         # default is for mamba/transformer since those are the same,
         # as they can run through all the data in parallel
@@ -50,7 +51,7 @@ class SequenceModel(nn.Module, ABC):
 
     def imagine_step(
         self, latent, action, model_state, prior
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
         # returns next_latent, seq_state, new_model_state
         seq_state, model_state = self.step(
             latent, action, model_state
@@ -61,7 +62,7 @@ class SequenceModel(nn.Module, ABC):
 
     def imagine_rollout(
         self, initial_latent, initial_seq, model_state, horizon, actor, prior
-    ) -> tuple[Tensor, Tensor, Tensor]:
+    ) -> Tuple[Tensor, Tensor, Tensor]:
         # returns
         # imagined_latents, imagined_seq_states (actor), imagined_sequence_states (heads), actions
         latent, seq_state = initial_latent, initial_seq  # z_0, d_initial
@@ -175,7 +176,7 @@ class RSSM(SequenceModel):
 
     def imagine_rollout(
         self, initial_latent, initial_seq, model_state, horizon, actor, prior
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
         # returns
         # imagined_latents, imagined_seq_states (actor), imagined_sequence_states (heads), actions
         latent, seq_state = initial_latent, initial_seq  # z_0, h_0
@@ -303,6 +304,99 @@ class TransformerSequenceModel(SequenceModel):
             self.blocks[i].allocate_kv_cache(batch_size, device) for i in range(self.n_layers)
         ]
         return (caches, 0)  # (per-block caches, seq_offset)
+
+    def parallel_forward(self, latents, actions, state=None):
+        if latents.ndim > actions.ndim:
+            latents = latents.flatten(-2)
+        x = torch.cat([latents, actions], -1)
+        x = self.proj(x)
+        B, T, _ = x.shape
+
+        if state is not None:
+            block_caches, seq_offset = state
+        else:
+            block_caches, seq_offset = [None] * self.n_layers, 0
+
+        new_caches = []
+        for block, cache in zip(self.blocks, block_caches):
+            x, new_cache = block(x, cache=cache, seq_offset=seq_offset)
+            new_caches.append(new_cache)
+
+        x = self.norm_f(x)
+
+        if state is not None:
+            new_state = (new_caches, seq_offset + T)
+        else:
+            new_state = None
+
+        return x, new_state
+
+    def step(self, latent, action, state):
+        latent_t = latent.unsqueeze(1)
+        action_t = action.unsqueeze(1)
+        output, state = self.parallel_forward(latent_t, action_t, state)
+        return output.squeeze(1), state
+
+
+class TransformerSequenceModelV2(SequenceModel):
+    def __init__(
+        self,
+        latent_size,
+        action_dim,
+        d_model,
+        num_heads=8,
+        n_layers=2,
+        max_seq_len=1024,
+        expand=4,
+        dropout_p=0.0,
+        act=nn.SiLU,
+        use_sdpa=True,
+        norm="layer",
+    ):
+        super().__init__()
+        in_proj = nn.Linear(latent_size + action_dim, d_model, bias=False)
+        act_fn = act()
+        self.proj = nn.Sequential(in_proj, act_fn)
+        self.blocks = nn.ModuleList(
+            [
+                TransformerBlock(
+                    d_model, num_heads, max_seq_len, expand, dropout_p, act, use_sdpa=use_sdpa
+                )
+                for _ in range(n_layers)
+            ]
+        )
+        self.norm_f = get_norm(norm, d_model)
+        self.d_model = d_model
+        self.n_layers = n_layers
+        self.max_seq_len = max_seq_len
+
+    @property
+    def output_dim(self):
+        return self.d_model
+
+    def initial_state(self, batch_size, device):
+        caches = [
+            self.blocks[i].allocate_kv_cache(batch_size, device) for i in range(self.n_layers)
+        ]
+        return (caches, 0)  # (per-block caches, seq_offset)
+
+    def rollout(
+        self, embeddings, actions, posterior, prior, dones=None
+    ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+        # returns (latents, states, posterior_dists, prior_dists),
+        # default is for mamba/transformer since those are the same,
+        # as they can run through all the data in parallel
+        # RSSM has an override
+        post_dist = posterior(embeddings, None)
+        latents = post_dist.rsample()  # z_{0:T} = p(x_{0:T})
+        seq_state, _ = self.parallel_forward(latents, actions)  # d_{0:T} = f(z_{0:T}, a_{0:T})
+        prior_dist = prior(seq_state)
+        return (
+            latents,
+            seq_state,
+            post_dist.logits[:, 1:],
+            prior_dist.logits[:, :-1],
+        )
 
     def parallel_forward(self, latents, actions, state=None):
         if latents.ndim > actions.ndim:
