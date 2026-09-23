@@ -1,4 +1,8 @@
+from typing import Callable, Optional, Sequence
+
 import numpy as np
+
+PriorityFn = Callable[..., np.ndarray]
 
 
 class SumTree:
@@ -38,3 +42,66 @@ class SumTree:
     @property
     def total_priority(self):
         return self.array[1]
+
+
+def error_priority(alpha: float = 0.6, eps: float = 1e-6) -> PriorityFn:
+    def fn(losses, **_):
+        return (np.abs(losses) + eps) ** alpha
+
+    return fn
+
+
+def count_priority(beta: float = 0.5) -> PriorityFn:
+    # rewards rarely-sampled transitions; counts is each transition's number of prior samples
+    def fn(counts, **_):
+        return 1.0 / (np.asarray(counts) + 1.0) ** beta
+
+    return fn
+
+
+def combine_priorities(
+    *fns: PriorityFn,
+    weights: Optional[Sequence[float]] = None,
+    combine: str = "sum",
+) -> PriorityFn:
+    weights = [1.0] * len(fns) if weights is None else weights
+
+    def fn(**stats):
+        values = [w * f(**stats) for w, f in zip(weights, fns)]
+        if combine == "sum":
+            return np.sum(values, axis=0)
+        elif combine == "product":
+            return np.prod(values, axis=0)
+        raise ValueError(f"unknown combine mode: {combine}")
+
+    return fn
+
+
+class PrioritizedBuffer:
+    # sample stats (e.g. losses, counts) are passed through as kwargs to priority_fn,
+    # so error-based / count-based / hybrid priorities are just different priority_fn's,
+    # not different classes - see error_priority, count_priority, combine_priorities above.
+    def __init__(
+        self,
+        size,
+        initial_value,
+        priority_fn: Optional[PriorityFn] = None,
+    ):
+        self.sumtree = SumTree(size)
+        self.initial_value = initial_value
+        self.priority_fn = priority_fn
+        self.counts = np.zeros(self.sumtree.size, dtype=np.int64)
+
+    def sample_indices(self, batch_size):
+        values = np.random.uniform(0, self.sumtree.total_priority, size=batch_size)
+        indices = self.sumtree.query(values)
+        self.counts[indices] += 1
+        return indices
+
+    def add_indices(self, indices):
+        self.sumtree.update(indices, np.full(len(np.atleast_1d(indices)), self.initial_value))
+        self.counts[np.atleast_1d(indices)] = 0
+
+    def update_priorities(self, indices, **stats):
+        values = stats["losses"] if self.priority_fn is None else self.priority_fn(**stats)
+        self.sumtree.update(indices, values)

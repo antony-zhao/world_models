@@ -2,15 +2,20 @@ from typing import List
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from world_models.torch.agents.actor_critic import Actor, Critic
 from world_models.torch.common.decoders import ConvDecoder
-from world_models.torch.common.models import TargetNetwork
-from world_models.torch.common.utils import compute_lambda_returns, make_state, symlog_squared_error
+from world_models.torch.common.models import MLP, TargetNetwork
+from world_models.torch.common.utils import (
+    compute_lambda_returns,
+    symlog_squared_error,
+)
 
 
 class RepresentationObjective(nn.Module):
     def __init__(self, cfg):
+        self.weight = cfg.weight
         super().__init__()
 
     def step(self): ...
@@ -38,7 +43,6 @@ class CompoundObjective(nn.Module):
 class ReconstructionObjective(RepresentationObjective):
     def __init__(self, cfg):
         super().__init__(cfg)
-        self.weight = cfg.weight
         self.obs_type = cfg.obs_type
         self.decoder = self.build_decoder(cfg, cfg.encoder_conv_dim)
         if hasattr(cfg, "stop_grad"):
@@ -51,7 +55,7 @@ class ReconstructionObjective(RepresentationObjective):
     def build_decoder(self, cfg, encoder_output_dim):
         if cfg.type == "conv":
             return ConvDecoder(
-                cfg.latent_size + cfg.state_dim if cfg.use_combined_state else cfg.latent_size,
+                cfg.latent_size + cfg.d_model if cfg.use_combined_state else cfg.latent_size,
                 encoder_output_dim,
                 cfg.filter_base,
                 cfg.num_convs,
@@ -80,10 +84,39 @@ class ReconstructionObjective(RepresentationObjective):
         return self.weight * loss, {"wm/loss/reconstruction_loss": loss.item()}
 
 
+class CDPObjective(RepresentationObjective):
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        self.rssm = cfg.type == "rssm"
+        self.cdp_predictor = MLP(
+            cfg.d_model, cfg.embedding_dim, cfg.hidden_dim, cfg.num_hiddens, cfg.norm
+        )
+
+    def forward(self, context):
+        if self.rssm:
+            seq_states = context["seq_states"][:, 1:]
+            embedding_targets = context["obs_embeddings"][:, 1:].detach()
+        else:
+            seq_states = context["seq_states"][:, :-1]
+            embedding_targets = context["obs_embeddings"][:, 1:].detach()
+        embedding_predictions = self.cdp_predictor(seq_states)
+        target_norm = embedding_targets.norm(dim=-1)
+        pred_norm = embedding_predictions.norm(dim=-1)
+        cos_sim = -F.cosine_similarity(
+            embedding_targets, embedding_predictions, dim=-1
+        ).mean()  # no dim=-1 worked for some reason, something to look at
+        return self.weight * cos_sim, {
+            "wm/loss/cdp_loss": cos_sim.item(),
+            "wm/stats/cdp_target_norm_min": target_norm.min().item(),
+            "wm/stats/cdp_target_norm_mean": target_norm.mean().item(),
+            "wm/stats/cdp_pred_norm_min": pred_norm.min().item(),
+            "wm/stats/cdp_pred_norm_mean": pred_norm.mean().item(),
+        }
+
+
 class ActionObjective(RepresentationObjective):
     def __init__(self, cfg):
         super().__init__(cfg)
-        self.weight = cfg.weight
         self.action_type = cfg.action_type
         self.rssm = cfg.type == "rssm"
         input_dim = cfg.embedding_dim + cfg.joint_state_dim
@@ -123,9 +156,8 @@ class ActionObjective(RepresentationObjective):
 class ValueObjective(RepresentationObjective):
     def __init__(self, cfg):
         super().__init__(cfg)
-        self.weight = cfg.weight
         self.rssm = cfg.type == "rssm"
-        input_dim = cfg.latent_size + cfg.state_dim
+        input_dim = cfg.latent_size + cfg.d_model
         self.value_predictor = Critic(
             input_dim,
             cfg.hidden_dim,
@@ -165,3 +197,48 @@ class ValueObjective(RepresentationObjective):
 
     def step(self):
         self.target.update()
+
+
+class TemporalConsistencyObjective(RepresentationObjective):
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        self.rssm = cfg.type == "rssm"
+        self.predictor = MLP(
+            cfg.d_model, cfg.embedding_dim, cfg.hidden_dim, cfg.num_hiddens, cfg.norm
+        )
+
+    def forward(self, context):
+        if self.rssm:
+            seq_states = context["seq_states"][:, 1:]
+            embedding_targets = context["obs_embeddings"][:, 1:].detach()
+        else:
+            seq_states = context["seq_states"][:, :-1]
+            embedding_targets = context["obs_embeddings"][:, 1:].detach()
+        embedding_predictions = self.cdp_predictor(seq_states)
+        target_norm = embedding_targets.norm(dim=1)
+        pred_norm = embedding_predictions.norm(dim=1)
+        cos_sim = -F.cosine_similarity(
+            embedding_targets, embedding_predictions, dim=1, eps=1e-5
+        ).mean()  # no dim=-1 worked for some reason, something to look at
+        return self.weight * cos_sim, {
+            "wm/loss/cdp_loss": cos_sim.item(),
+            "wm/stats/cdp_target_norm_min": target_norm.min().item(),
+            "wm/stats/cdp_target_norm_mean": target_norm.mean().item(),
+            "wm/stats/cdp_pred_norm_min": pred_norm.min().item(),
+            "wm/stats/cdp_pred_norm_mean": pred_norm.mean().item(),
+        }
+
+
+class Plan2Explore(RepresentationObjective):
+    def __init__(self):
+        pass
+
+    def forward(self):
+        pass
+
+    def compute_intrinsic_reward(self):
+        pass
+
+
+class LatentDisagreement(RepresentationObjective):
+    pass

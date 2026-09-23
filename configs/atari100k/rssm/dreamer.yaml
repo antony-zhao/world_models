@@ -29,6 +29,8 @@ wm:
 
   obj_coef: 1.0
   dyn_coef: 0.5
+  reward_coef: 1.0
+  continue_coef: 1.0
   repr_coef: 0.1
   head_coef: 1.0
 
@@ -89,7 +91,8 @@ buffer:
 optim:
   wm_lr: 1.0e-4
   ac_lr: 3.0e-5
-  eps: 1.0e-8
+  wm_eps: 1.0e-8
+  ac_eps: 1.0e-5
   wm_clip: 1000.0
   ac_clip: 100.0
 

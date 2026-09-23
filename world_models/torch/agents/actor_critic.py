@@ -46,11 +46,48 @@ class Actor(nn.Module):
             logits = self.mlp(x)
             probs = torch.softmax(logits, -1)
             unimixed_probs = unimix(probs, self.action_dim, self.actor_unimix)
-            action_dist = Categorical(probs=unimixed_probs)
+            try:
+                action_dist = Categorical(probs=unimixed_probs)
+            except ValueError:
+                self._report_action_dist_failure(
+                    x=x, logits=logits, probs=probs, unimixed_probs=unimixed_probs
+                )
+                raise
         else:
             mean, std = self.mlp(x)
-            action_dist = SafeTanhNormal(loc=mean, scale=std)
+            try:
+                action_dist = SafeTanhNormal(loc=mean, scale=std)
+            except ValueError:
+                self._report_action_dist_failure(x=x, mean=mean, std=std)
+                raise
         return action_dist
+
+    def _report_action_dist_failure(self, **tensors):
+        # x being non-finite implicates the world model/upstream state; logits/probs/etc
+        # being non-finite while x is clean implicates this actor's own weights instead.
+        print("\n[Actor.policy_dist] failed to build the action distribution - diagnostics:")
+        for name, t in tensors.items():
+            finite = torch.isfinite(t)
+            n_nan = int(torch.isnan(t).sum())
+            n_inf = int(torch.isinf(t).sum())
+            finite_vals = t[finite]
+            lo = finite_vals.min().item() if finite_vals.numel() else float("nan")
+            hi = finite_vals.max().item() if finite_vals.numel() else float("nan")
+            print(
+                f"  {name}: shape={tuple(t.shape)} nan={n_nan} inf={n_inf} "
+                f"finite_range=[{lo:.4g}, {hi:.4g}]"
+            )
+
+        bad_params = [n for n, p in self.named_parameters() if not torch.isfinite(p).all()]
+        if bad_params:
+            print(f"  actor parameters containing nan/inf: {bad_params}")
+        else:
+            print(
+                "  actor parameters: all finite -> the bad values came in through the "
+                "input `x`, i.e. upstream from the world model/RSSM/encoder, not this "
+                "actor's own weights"
+            )
+        print()
 
     def sample_action(self, dist):
         if self.action_type == "discrete":

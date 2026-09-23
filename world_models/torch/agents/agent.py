@@ -9,11 +9,16 @@ from world_models.torch.agents.builder import (
     build_actor,
     build_buffer,
     build_critic,
+    build_wm_optimizer,
     build_world_model,
 )
 from world_models.torch.common.models import TargetNetwork
 from world_models.torch.common.sequence_models import RSSM
-from world_models.torch.common.utils import compute_lambda_returns, make_state, to_numpy
+from world_models.torch.common.utils import (
+    compute_lambda_returns,
+    make_state,
+    to_numpy,
+)
 
 
 class Agent(nn.Module):
@@ -30,9 +35,10 @@ class Agent(nn.Module):
         self.critic_target = TargetNetwork(self.critic, cfg.train.critic_tau)
         self.buffer = build_buffer(cfg.buffer)
 
-        self.optim_wm = optim.Adam(
-            self.world_model.parameters(), cfg.optim.wm_lr, eps=cfg.optim.wm_eps
-        )
+        self.optim_wm = build_wm_optimizer(cfg.optim, self.world_model)
+        # optim.Adam(
+        #     self.world_model.parameters(), cfg.optim.wm_lr, eps=cfg.optim.wm_eps
+        # )
         self.optim_actor = optim.Adam(
             self.actor.parameters(), cfg.optim.ac_lr, eps=cfg.optim.ac_eps
         )
@@ -219,7 +225,9 @@ class Agent(nn.Module):
             make_state(latents, head_seq) if self.world_model.use_combined_state else head_seq
         )
         reward_pred = self.world_model.reward_predictor(head_state).mean().detach()
-        continue_pred = self.world_model.continue_predictor(head_state).mode.squeeze(-1).detach()
+        continue_probs = self.world_model.continue_predictor(head_state).mean
+        # continue_pred = (continue_probs >= 0.5).float().squeeze(-1).detach()
+        continue_pred = continue_probs.squeeze(-1).detach()
         continue_pred[:, 0] = initial_continue
         weights = torch.cumprod(continue_pred * self.gamma, 1).detach() / self.gamma
         actor_state = make_state(latents, actor_seq).detach()
@@ -243,13 +251,31 @@ class Agent(nn.Module):
         critic_main = -value_dist.log_prob(returns.detach())
         critic_reg = -value_dist.log_prob(value_targets[:, :-1].detach())
         critic_loss = ((critic_main + critic_reg) * weights[:, :-1]).mean()
+        self._check_ac_finite(
+            "pre-backward",
+            imagined_actor_state=actor_state,
+            reward_pred=reward_pred,
+            continue_pred=continue_pred,
+            weights=weights,
+            values=values,
+            value_targets=value_targets,
+            returns=returns,
+            returns_range_ema=self.returns_range_ema,
+            adv=adv,
+            log_probs=log_probs,
+            entropy=entropy,
+            actor_loss=actor_loss,
+            critic_loss=critic_loss,
+        )
         self.optim_critic.zero_grad(set_to_none=True)
         critic_loss.backward()
-        nn.utils.clip_grad_norm_(self.critic.parameters(), self.ac_clip)
+        critic_grad_norm = nn.utils.clip_grad_norm_(self.critic.parameters(), self.ac_clip)
+        self._check_ac_finite("critic grad norm", critic_grad_norm=critic_grad_norm)
         self.optim_critic.step()
         self.optim_actor.zero_grad(set_to_none=True)
         actor_loss.backward()
-        nn.utils.clip_grad_norm_(self.actor.parameters(), self.ac_clip)
+        actor_grad_norm = nn.utils.clip_grad_norm_(self.actor.parameters(), self.ac_clip)
+        self._check_ac_finite("actor grad norm", actor_grad_norm=actor_grad_norm)
         self.optim_actor.step()
         self.critic_target.update()
         return {
@@ -262,6 +288,23 @@ class Agent(nn.Module):
             "ac/stats/value_mean": to_numpy(values.mean()),
             "ac/stats/returns_range_ema": to_numpy(self.returns_range_ema),
         }
+
+    def _check_ac_finite(self, where, **tensors):
+        # kwargs are passed in computation order, so the first bad name is the earliest culprit
+        bad = [n for n, t in tensors.items() if not torch.isfinite(t).all()]
+        if not bad:
+            return
+        print(f"\n[Agent._train_actor_critic] non-finite values at '{where}'; first bad: {bad[0]}")
+        for name, t in tensors.items():
+            t = t.detach().float()
+            finite = t[torch.isfinite(t)]
+            lo = finite.min().item() if finite.numel() else float("nan")
+            hi = finite.max().item() if finite.numel() else float("nan")
+            print(
+                f"  {name}: shape={tuple(t.shape)} nan={int(torch.isnan(t).sum())} "
+                f"inf={int(torch.isinf(t).sum())} finite_range=[{lo:.4g}, {hi:.4g}]"
+            )
+        raise FloatingPointError(f"non-finite values at '{where}': {bad}")
 
     def _normalize_advantages(self, returns, advantages):
         q_hi = torch.quantile(returns, self.returns_pct_hi)
@@ -282,3 +325,37 @@ class Agent(nn.Module):
 
     def state_dict_full(self): ...
     def load_state_dict_full(self, state): ...
+
+
+class TestAgent(Agent):
+    """Agent that also tracks per-env episode ids and stores them in the buffer as an extra item.
+
+    Ids are globally unique across envs. Buffer items are cast to float32 on sampling, so ids are
+    only exact below 2**24. The ids from the latest sampled batch are kept in self.last_episode_ids
+    (shape matches rewards, i.e. batch x seq_len).
+    """
+
+    __test__ = False  # not a pytest test class
+
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        self.episode_ids = np.arange(self.num_envs, dtype=np.int64)
+        self.next_episode_id = self.num_envs
+        self.last_episode_ids = None
+
+    def add_transition(self, obs, action, reward, terminated, truncated):
+        self.buffer.add_sample(
+            [obs, action, reward, terminated, truncated, self.episode_ids.copy()]
+        )
+        self.step_count += self.num_envs
+        dones = np.asarray(terminated | truncated, dtype=bool)
+        if self.is_rssm:
+            self.prev_done = torch.tensor(dones).to(self.device)
+        for i in np.flatnonzero(dones):
+            self.episode_ids[i] = self.next_episode_id
+            self.next_episode_id += 1
+
+    def _sample_batch(self, batch_size, seq_len):
+        *batch, episode_ids = self.buffer.sample_as_tensors(self.device, batch_size, seq_len)
+        self.last_episode_ids = episode_ids.long()
+        return batch

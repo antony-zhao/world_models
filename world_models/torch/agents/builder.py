@@ -1,3 +1,5 @@
+from torch import optim
+
 from world_models.buffers.buffers import PerEnvBuffer
 from world_models.torch.agents.actor_critic import Actor, Critic
 from world_models.torch.agents.world_model import WorldModel
@@ -6,6 +8,7 @@ from world_models.torch.common.heads import BernoulliHead, CategoricalHead, TwoH
 from world_models.torch.common.models import Posterior, Prior
 from world_models.torch.common.objectives import (
     ActionObjective,
+    CDPObjective,
     CompoundObjective,
     ReconstructionObjective,
     ValueObjective,
@@ -125,6 +128,8 @@ def build_objective(cfg):
             objectives.append(ActionObjective(obj_cfg))
         elif obj_cfg.name == "value_prediction":
             objectives.append(ValueObjective(obj_cfg))
+        elif obj_cfg.name == "cdp":
+            objectives.append(CDPObjective(obj_cfg))
         elif obj_cfg.name == "infonce":
             raise NotImplementedError
         elif obj_cfg.name == "sigreg":
@@ -135,6 +140,30 @@ def build_objective(cfg):
     if len(objectives) == 1:
         return objectives[0]
     return CompoundObjective(objectives)
+
+
+def build_wm_optimizer(cfg, world_model):
+    default_lr = cfg.wm_lr
+    encoder_lr = cfg.get("encoder_lr", default_lr)
+    seq_lr = cfg.get("sequence_model_lr", default_lr)
+    obj_lr = cfg.get("objective_lr", default_lr)
+
+    encoder_params = list(world_model.encoder.parameters())
+    seq_params = list(world_model.sequence_model.parameters())
+    obj_params = list(world_model.objective.parameters())
+
+    seen = set(id(p) for p in encoder_params + seq_params + obj_params)
+    other_params = [p for p in world_model.parameters() if id(p) not in seen]
+
+    return optim.Adam(
+        [
+            {"params": encoder_params, "lr": encoder_lr},
+            {"params": seq_params, "lr": seq_lr},
+            {"params": obj_params, "lr": obj_lr},
+            {"params": other_params, "lr": default_lr},
+        ],
+        eps=cfg.wm_eps,
+    )
 
 
 def build_world_model(cfg, action_dim) -> WorldModel:
