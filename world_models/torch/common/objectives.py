@@ -199,6 +199,70 @@ class ValueObjective(RepresentationObjective):
         self.target.update()
 
 
+class ContrastiveTrajectoryObjective(RepresentationObjective):
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        self.rssm = cfg.type == "rssm"
+        self.gamma = cfg.gamma
+        self.beta = cfg.beta
+
+        self.state_proj = MLP(cfg.d_model, cfg.embed_dim, cfg.hidden_dim, cfg.num_hiddens, cfg.norm)
+        self.obs_proj = MLP(
+            cfg.embedding_dim, cfg.embed_dim, cfg.hidden_dim, cfg.num_hiddens, cfg.norm
+        )
+
+        B = cfg.batch_size
+        T = cfg.seq_len - 1
+        weight_block = self.discount_matrix(T, self.gamma) - self.beta
+        weight = torch.block_diag(*([weight_block] * B)) + self.beta
+        self.register_buffer("weight_matrix", weight)
+        target_block = torch.ones((T, T))
+        target = torch.block_diag(*([target_block] * B))
+        self.register_buffer("target_matrix", target)
+        t_idx = torch.arange(T)
+        lag_block = (t_idx[None, :] - t_idx[:, None]).float()  # entry j - i
+        self.register_buffer("lag_matrix", torch.block_diag(*([lag_block] * B)))
+
+    def discount_matrix(self, n, gamma, normalize=False):
+        idx = torch.arange(n)
+        exps = (idx[None, :] - idx[:, None]).clamp(min=0)
+        mat = torch.triu(torch.full((n, n), gamma) ** exps)
+        if normalize:
+            mat /= mat.sum(-1, keepdim=True)
+        return mat
+
+    def forward(self, context):
+        if self.rssm:
+            seq_states = context["seq_states"][:, 1:]
+            embedding_targets = context["obs_embeddings"][:, 1:]
+        else:
+            seq_states = context["seq_states"][:, :-1]
+            embedding_targets = context["obs_embeddings"][:, 1:]
+
+        B, T, _ = seq_states.shape
+        seq_proj = self.state_proj(seq_states)
+        obs_proj = self.obs_proj(embedding_targets)
+        dones = context["dones"].float()
+        segments = (dones.cumsum(1) - dones)[:, 1:].flatten()
+        same_segment = segments[:, None] == segments[None, :]
+        target = self.target_matrix * same_segment
+
+        in_block = self.target_matrix.bool()
+        weight = torch.where(in_block & ~same_segment, self.beta, self.weight_matrix)
+
+        dot_prod = torch.einsum("ijx,klx->ijkl", seq_proj, obs_proj).reshape(B * T, B * T)
+        loss = F.binary_cross_entropy_with_logits(
+            dot_prod, target, weight=weight, reduction="sum"
+        ) / (B * T)
+
+        stats = {
+            "wm/loss/contrastive_loss": loss.item(),
+            "wm/stats/state_embed_norm": seq_proj.norm(dim=-1).mean().item(),
+            "wm/stats/obs_embed_norm": obs_proj.norm(dim=-1).mean().item(),
+        }
+        return self.weight * loss, stats
+
+
 class TemporalConsistencyObjective(RepresentationObjective):
     def __init__(self, cfg):
         super().__init__(cfg)
@@ -207,26 +271,26 @@ class TemporalConsistencyObjective(RepresentationObjective):
             cfg.d_model, cfg.embedding_dim, cfg.hidden_dim, cfg.num_hiddens, cfg.norm
         )
 
-    def forward(self, context):
-        if self.rssm:
-            seq_states = context["seq_states"][:, 1:]
-            embedding_targets = context["obs_embeddings"][:, 1:].detach()
-        else:
-            seq_states = context["seq_states"][:, :-1]
-            embedding_targets = context["obs_embeddings"][:, 1:].detach()
-        embedding_predictions = self.cdp_predictor(seq_states)
-        target_norm = embedding_targets.norm(dim=1)
-        pred_norm = embedding_predictions.norm(dim=1)
-        cos_sim = -F.cosine_similarity(
-            embedding_targets, embedding_predictions, dim=1, eps=1e-5
-        ).mean()  # no dim=-1 worked for some reason, something to look at
-        return self.weight * cos_sim, {
-            "wm/loss/cdp_loss": cos_sim.item(),
-            "wm/stats/cdp_target_norm_min": target_norm.min().item(),
-            "wm/stats/cdp_target_norm_mean": target_norm.mean().item(),
-            "wm/stats/cdp_pred_norm_min": pred_norm.min().item(),
-            "wm/stats/cdp_pred_norm_mean": pred_norm.mean().item(),
-        }
+    # def forward(self, context):
+    #     if self.rssm:
+    #         seq_states = context["seq_states"][:, 1:]
+    #         embedding_targets = context["obs_embeddings"][:, 1:].detach()
+    #     else:
+    #         seq_states = context["seq_states"][:, :-1]
+    #         embedding_targets = context["obs_embeddings"][:, 1:].detach()
+    #     embedding_predictions = self.cdp_predictor(seq_states)
+    #     target_norm = embedding_targets.norm(dim=1)
+    #     pred_norm = embedding_predictions.norm(dim=1)
+    #     cos_sim = -F.cosine_similarity(
+    #         embedding_targets, embedding_predictions, dim=1, eps=1e-5
+    #     ).mean()  # no dim=-1 worked for some reason, something to look at
+    #     return self.weight * cos_sim, {
+    #         "wm/loss/cdp_loss": cos_sim.item(),
+    #         "wm/stats/cdp_target_norm_min": target_norm.min().item(),
+    #         "wm/stats/cdp_target_norm_mean": target_norm.mean().item(),
+    #         "wm/stats/cdp_pred_norm_min": pred_norm.min().item(),
+    #         "wm/stats/cdp_pred_norm_mean": pred_norm.mean().item(),
+    #     }
 
 
 class Plan2Explore(RepresentationObjective):

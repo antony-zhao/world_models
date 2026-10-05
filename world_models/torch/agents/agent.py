@@ -196,7 +196,7 @@ class Agent(nn.Module):
 
     def _train_world_model(self, obs, actions, rewards, terminated, dones):
         wm_loss, wm_loss_dict, latents, seq_states = self.world_model.world_model_loss(
-            obs, actions, rewards, terminated, dones
+            obs, actions, rewards, terminated, dones, buffer=self.buffer
         )
         self.optim_wm.zero_grad(set_to_none=True)
         wm_loss.backward()
@@ -251,31 +251,13 @@ class Agent(nn.Module):
         critic_main = -value_dist.log_prob(returns.detach())
         critic_reg = -value_dist.log_prob(value_targets[:, :-1].detach())
         critic_loss = ((critic_main + critic_reg) * weights[:, :-1]).mean()
-        self._check_ac_finite(
-            "pre-backward",
-            imagined_actor_state=actor_state,
-            reward_pred=reward_pred,
-            continue_pred=continue_pred,
-            weights=weights,
-            values=values,
-            value_targets=value_targets,
-            returns=returns,
-            returns_range_ema=self.returns_range_ema,
-            adv=adv,
-            log_probs=log_probs,
-            entropy=entropy,
-            actor_loss=actor_loss,
-            critic_loss=critic_loss,
-        )
         self.optim_critic.zero_grad(set_to_none=True)
         critic_loss.backward()
-        critic_grad_norm = nn.utils.clip_grad_norm_(self.critic.parameters(), self.ac_clip)
-        self._check_ac_finite("critic grad norm", critic_grad_norm=critic_grad_norm)
+        nn.utils.clip_grad_norm_(self.critic.parameters(), self.ac_clip)
         self.optim_critic.step()
         self.optim_actor.zero_grad(set_to_none=True)
         actor_loss.backward()
-        actor_grad_norm = nn.utils.clip_grad_norm_(self.actor.parameters(), self.ac_clip)
-        self._check_ac_finite("actor grad norm", actor_grad_norm=actor_grad_norm)
+        nn.utils.clip_grad_norm_(self.actor.parameters(), self.ac_clip)
         self.optim_actor.step()
         self.critic_target.update()
         return {
@@ -288,23 +270,6 @@ class Agent(nn.Module):
             "ac/stats/value_mean": to_numpy(values.mean()),
             "ac/stats/returns_range_ema": to_numpy(self.returns_range_ema),
         }
-
-    def _check_ac_finite(self, where, **tensors):
-        # kwargs are passed in computation order, so the first bad name is the earliest culprit
-        bad = [n for n, t in tensors.items() if not torch.isfinite(t).all()]
-        if not bad:
-            return
-        print(f"\n[Agent._train_actor_critic] non-finite values at '{where}'; first bad: {bad[0]}")
-        for name, t in tensors.items():
-            t = t.detach().float()
-            finite = t[torch.isfinite(t)]
-            lo = finite.min().item() if finite.numel() else float("nan")
-            hi = finite.max().item() if finite.numel() else float("nan")
-            print(
-                f"  {name}: shape={tuple(t.shape)} nan={int(torch.isnan(t).sum())} "
-                f"inf={int(torch.isinf(t).sum())} finite_range=[{lo:.4g}, {hi:.4g}]"
-            )
-        raise FloatingPointError(f"non-finite values at '{where}': {bad}")
 
     def _normalize_advantages(self, returns, advantages):
         q_hi = torch.quantile(returns, self.returns_pct_hi)

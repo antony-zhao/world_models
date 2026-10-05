@@ -33,6 +33,23 @@ def _to_cxhxw(obs):
     return np.transpose(obs[:, 0], (0, 3, 1, 2))
 
 
+class ChannelFirst(gym.vector.VectorWrapper):
+    # TransformObservation asserts NEXT_STEP autoreset; this does the same transform under SameStep.
+    # info["final_obs"] is left untransformed (unused).
+    def __init__(self, env, observation_space, single_observation_space):
+        super().__init__(env)
+        self.observation_space = observation_space
+        self.single_observation_space = single_observation_space
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        return _to_cxhxw(obs), info
+
+    def step(self, actions):
+        obs, rewards, terms, truncs, info = self.env.step(actions)
+        return _to_cxhxw(obs), rewards, terms, truncs, info
+
+
 def build_envs(cfg):
     common = dict(
         img_height=64,
@@ -43,23 +60,25 @@ def build_envs(cfg):
         maxpool=True,
         noop_max=30,
         episodic_life=False,
-        life_loss_info=True,  # life-loss comes through `terminated`, NOT info["life_loss"]
+        life_loss_info=False,  # `terminated` only on game over (DreamerV3 `lives: unused`)
         reward_clipping=False,
         repeat_action_probability=0.0,
         use_fire_reset=False,
-        full_action_space=True,
+        full_action_space=False,
+        autoreset_mode=gym.vector.AutoresetMode.SAME_STEP,
     )
     single_space = gym.spaces.Box(0, 255, (3, 64, 64), np.uint8)
 
     def make(num):
         env = ale_py.AtariVectorEnv(game=cfg.env.game, num_envs=num, **common)
         batch_space = gym.spaces.Box(0, 255, (num, 3, 64, 64), np.uint8)
-        return TransformObservation(
-            env,
-            _to_cxhxw,
-            observation_space=batch_space,
-            single_observation_space=single_space,
-        )
+        return ChannelFirst(env, batch_space, single_space)
+        # return TransformObservation(
+        #     env,
+        #     _to_cxhxw,
+        #     observation_space=batch_space,
+        #     single_observation_space=single_space,
+        # )
 
     train_envs = make(cfg.num_envs)
     eval_envs = make(cfg.num_eval_envs)
@@ -74,11 +93,11 @@ def build_envs(cfg):
 
 @torch.no_grad()
 def evaluate(agent, env, num_episodes, eval_seed=None):
-    """Evaluate using full-game returns (don't treat life loss as terminal).
+    """Evaluate using full-game returns.
 
-    With life_loss_info=True the env reports `terminated=True` on every life
-    loss (without resetting until all lives are gone), so we detect a true
-    game-over as `terminated & (lives == 0)` and accumulate returns across lives.
+    With life_loss_info=False, `terminated` only fires on game over. Under SameStep
+    autoreset, info["lives"] at a done step already belongs to the reset game, so
+    game over is detected from `terminated | truncated` rather than `lives == 0`.
     """
     num_envs = env.num_envs
     returns_buffer = []
@@ -98,7 +117,7 @@ def evaluate(agent, env, num_episodes, eval_seed=None):
         # the recurrent/transformer context (consistent with training), so use the
         # full terminal signal here.
         prev_dones = terms | truncs
-        game_over = terms & (infos["lives"] == 0)
+        game_over = terms | truncs
 
         ep_returns += rewards
         ep_lengths += 1
@@ -124,12 +143,12 @@ def prefill_buffer(agent, envs, cfg, initial_obs):
     for _ in range(cfg.train.prefill_steps):
         actions = envs.action_space.sample()
         next_obs, rewards, terms, truncs, infos = envs.step(actions)
-        # life_loss_info=True => `terms` already includes life-loss terminals.
+        # life_loss_info=False => `terms` is game over only.
         terms_for_buffer = terms
         agent.add_transition(obs, actions, rewards, terms_for_buffer, truncs)
         episode_returns += rewards
-        # Full-game boundary for return tracking (life-loss is not game-over).
-        game_over = terms & (infos["lives"] == 0)
+        # Full-game boundary for return tracking.
+        game_over = terms | truncs
         for i in np.where(game_over)[0]:
             completed.append(float(episode_returns[i]))
             episode_returns[i] = 0.0
@@ -219,14 +238,14 @@ def main(cfg_path: str, overrides: list[str] = None):
         # Interact
         actions = agent.act(obs.astype(np.float32))
         next_obs, rewards, terms, truncs, infos = train_envs.step(actions)
-        # life_loss_info=True => `terms` already includes life-loss terminals,
+        # life_loss_info=False => `terms` is game over only,
         # which is exactly what we want in the buffer (STORM convention).
         terms_for_buffer = terms
         agent.add_transition(obs, actions, rewards, terms_for_buffer, truncs)
 
         episode_returns += rewards
-        # logging: only count a full game (all lives lost) as done
-        game_over = terms & (infos["lives"] == 0)
+        # logging: a full game ends on terminated or truncated
+        game_over = terms | truncs
         for i in np.where(game_over)[0]:
             completed_returns.append(float(episode_returns[i]))
             episode_returns[i] = 0.0

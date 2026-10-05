@@ -104,6 +104,8 @@ def preprocess_config(cfg: DictConfig) -> DictConfig:
         _set_if_missing(obj_cfg, "num_bins", cfg.symlog.num_bins)
         _set_if_missing(obj_cfg, "bin_low", cfg.symlog.low)
         _set_if_missing(obj_cfg, "bin_high", cfg.symlog.high)
+        _set_if_missing(obj_cfg, "batch_size", cfg.train.wm_batch_size)
+        _set_if_missing(obj_cfg, "seq_len", cfg.train.wm_seq_len)
 
     # ---- Set posterior/prior norm defaults ----
     _set_if_missing(cfg.wm.posterior, "norm", "layer")

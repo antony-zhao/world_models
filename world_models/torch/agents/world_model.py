@@ -132,7 +132,7 @@ class WorldModel(nn.Module):
         actor.train()
         return latents, actor_seq, head_seq, actions
 
-    def world_model_loss(self, obs, actions, rewards, terminated, dones):
+    def world_model_loss(self, obs, actions, rewards, terminated, dones, buffer=None):
         transformed_obs = transform_obs(obs, self.is_image)
         obs_embeddings = self.encoder(transformed_obs)
         latents, seq_states, post_logits, prior_logits = self.sequence_model.rollout(
@@ -161,6 +161,8 @@ class WorldModel(nn.Module):
             "obs_embeddings": obs_embeddings,
             "post_logits": post_logits,
             "prior_logits": prior_logits,
+            "world_model": self,
+            "buffer": buffer,
         }
         obj_loss, loss_dict = self.objective(context)
         head_losses, head_loss_dict = self.head_losses(

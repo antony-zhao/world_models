@@ -10,6 +10,7 @@ from world_models.torch.common.objectives import (
     ActionObjective,
     CDPObjective,
     CompoundObjective,
+    ContrastiveTrajectoryObjective,
     ReconstructionObjective,
     ValueObjective,
 )
@@ -130,10 +131,8 @@ def build_objective(cfg):
             objectives.append(ValueObjective(obj_cfg))
         elif obj_cfg.name == "cdp":
             objectives.append(CDPObjective(obj_cfg))
-        elif obj_cfg.name == "infonce":
-            raise NotImplementedError
-        elif obj_cfg.name == "sigreg":
-            raise NotImplementedError
+        elif obj_cfg.name == "contrastive":
+            objectives.append(ContrastiveTrajectoryObjective(obj_cfg))
         else:
             raise ValueError(f"Unknown objective: {obj_cfg.name}")
 

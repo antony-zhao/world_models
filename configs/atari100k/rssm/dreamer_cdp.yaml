@@ -9,7 +9,7 @@ num_envs: 1
 num_eval_envs: 5
 
 env:
-  game: pong
+  game: breakout
 
 action_dim: null
 action_type: discrete
