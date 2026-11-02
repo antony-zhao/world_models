@@ -144,3 +144,83 @@ def compute_gae(rewards, values, dones, discount=0.99, lam=0.95):
         advantages[:, t] = lastgaelam = delta + discount * lam * nextnonterminal * lastgaelam
     returns = advantages + values[:, :-1]
     return advantages, returns
+
+
+import numpy as np
+import torch
+
+
+def make_quadrature(lam=1.0, T=16, t_min=0.2, t_max=4.0):
+    """Build quadrature knots and weights for the Epps-Pulley integral.
+
+    Returns:
+        t_knots : (T,) frequency knots, uniformly spaced in [t_min, t_max]
+        weights : (T,) trapezoidal weights * Gaussian frequency weight w(t_k)
+    """
+    t_knots = np.linspace(t_min, t_max, T)
+    dt = t_knots[1] - t_knots[0]
+    alpha = np.full(T, dt)  # trapezoidal weights
+    alpha[0] *= 0.5  # endpoints get half weight
+    alpha[-1] *= 0.5
+    return t_knots, alpha * np.exp(-(t_knots**2) / (2 * lam**2))
+
+
+def random_unit_vectors(M, D, rng):
+    """Sample M points uniformly from S^{D-1}."""
+    u = rng.standard_normal((M, D))
+    u /= np.linalg.norm(u, axis=1, keepdims=True)
+    return u
+
+
+def sigreg(Z, M=1024, lam=1.0, T=16, rng=None):
+    # Numpy implementations from: https://rezabyt.github.io/blogposts/sigreg-tutorial.html
+    """SIGReg = average Epps-Pulley statistic over M random projections.
+
+    Z   : (N, D) batch of embeddings
+    M   : number of random projection directions
+    lam : Gaussian-weight bandwidth
+    T   : number of quadrature knots
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    t_knots, weights = make_quadrature(lam=lam, T=T)
+    U = random_unit_vectors(M, Z.shape[1], rng)  # (M, D)
+    H = U @ Z.T  # (M, N): M projections
+
+    # Vectorized Epps-Pulley across all M projections
+    angles = t_knots[None, :, None] * H[:, None, :]  # (M, T, N)
+    C = np.cos(angles).mean(axis=2)  # (M, T)
+    S = np.sin(angles).mean(axis=2)  # (M, T)
+    G = np.exp(-(t_knots**2) / 2)  # (T,)
+    diff_sq = (C - G[None, :]) ** 2 + S**2  # (M, T)
+    return Z.shape[0] * (weights * diff_sq).sum(axis=1).mean()  # scalar
+
+
+class SIGReg(torch.nn.Module):
+    # From claude based on above.
+    """Differentiable torch version of `sigreg`.
+
+    forward(Z): Z is (..., N, D); the statistic is computed per leading index
+    (e.g. per view) over the N samples, then averaged.
+    """
+
+    def __init__(self, M=1024, lam=1.0, T=16, t_min=0.2, t_max=4.0):
+        super().__init__()
+        self.M = M
+        t_knots, weights = make_quadrature(lam=lam, T=T, t_min=t_min, t_max=t_max)
+        t_knots = torch.tensor(t_knots, dtype=torch.float32)
+        self.register_buffer("t", t_knots)
+        self.register_buffer("weights", torch.tensor(weights, dtype=torch.float32))
+        self.register_buffer("G", torch.exp(-(t_knots**2) / 2))
+
+    def forward(self, Z):
+        Z = Z.float()
+        U = torch.randn(Z.shape[-1], self.M, device=Z.device)
+        U = U / U.norm(dim=0, keepdim=True)  # (D, M) random unit directions
+        H = Z @ U  # (..., N, M)
+        angles = H.unsqueeze(-1) * self.t  # (..., N, M, T)
+        C = angles.cos().mean(-3)  # (..., M, T)
+        S = angles.sin().mean(-3)
+        diff_sq = (C - self.G) ** 2 + S**2
+        return Z.shape[-2] * (diff_sq @ self.weights).mean()

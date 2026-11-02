@@ -11,8 +11,7 @@ from world_models.torch.common.utils import get_norm, make_state
 
 class SequenceModel(nn.Module, ABC):
     """
-    General sequence model, forward does an entire sequence at once,
-    step does a single step.
+    General sequence model, forward does an entire sequence at once, step does a single step.
     The model_state is meant to handle things like hidden state for recurrent, kv cache, etc.
     """
 

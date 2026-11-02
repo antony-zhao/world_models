@@ -68,9 +68,14 @@ wm:
     - name: contrastive
       weight: 1.0
       gamma: 0.99
-      beta: 0.1
-      embed_dim: 512
-      num_hiddens: 0
+      num_negatives: 1024
+      loss_type: infonce
+      anchor: obs  # obs: phi(u_t, a_t) vs u_{t+1..}; posterior: phi(q(z_t), a_t) vs u_{t+1..}; state: phi(h_t) vs u_t..
+      energy: l2  # l2: -||phi - psi|| ; dot: phi^T psi (CRL)
+      logsumexp_penalty: 0.1
+      embed_dim: 64
+      hidden_dim: 1024
+      num_hiddens: 1
       norm: layer
       
 
@@ -102,7 +107,7 @@ train:
   prefill_steps: 1_000
   train_every: 1
   train_ratio: 1
-  train_ac_after: 5_000
+  train_ac_after: 2_000
 
   wm_batch_size: 16
   wm_seq_len: 64

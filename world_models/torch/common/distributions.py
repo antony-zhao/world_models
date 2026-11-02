@@ -29,6 +29,31 @@ class DiscreteLatentDist:
         return self.dist.mode
 
 
+class DeterministicLatentDist:
+    """Identity 'distribution' for continuous latents: every draw is the vector itself."""
+
+    def __init__(self, value):
+        self.value = value
+
+    def sample(self):
+        return self.value
+
+    def rsample(self):
+        return self.value
+
+    @property
+    def mode(self):
+        return self.value
+
+    @property
+    def logits(self):
+        return self.value
+
+    @property
+    def probs(self):
+        return self.value
+
+
 class TwoHotEncoding:
     def __init__(self, bins, logits=None, to_value=symexp, to_bin=symlog):
         self._logits = logits
