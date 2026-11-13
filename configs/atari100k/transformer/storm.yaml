@@ -9,7 +9,8 @@ num_envs: 1
 num_eval_envs: 5
 
 env:
-  game: pong
+  game: breakout
+  life_loss_terminal: true
 
 action_dim: null
 action_type: discrete
@@ -35,6 +36,8 @@ wm:
   dyn_coef: 0.5
   repr_coef: 0.1
   head_coef: 1.0
+  reward_coef: 1.0
+  continue_coef: 1.0
 
   latent:
     num_categories: 32
@@ -51,7 +54,7 @@ wm:
     d_model: 512
     n_layers: 2
     num_heads: 8
-    max_seq_len: 256
+    max_seq_len: 64   # KV cache length; imagination uses ac_seq_len + horizon (24) positions
     expand: 4
     dropout_p: 0.1
     use_sdpa: true
@@ -95,7 +98,8 @@ buffer:
 optim:
   wm_lr: 1.0e-4
   ac_lr: 3.0e-5
-  eps: 1.0e-8
+  wm_eps: 1.0e-8
+  ac_eps: 1.0e-8
   wm_clip: 1000.0
   ac_clip: 100.0
 

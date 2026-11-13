@@ -146,10 +146,6 @@ def compute_gae(rewards, values, dones, discount=0.99, lam=0.95):
     return advantages, returns
 
 
-import numpy as np
-import torch
-
-
 def make_quadrature(lam=1.0, T=16, t_min=0.2, t_max=4.0):
     """Build quadrature knots and weights for the Epps-Pulley integral.
 

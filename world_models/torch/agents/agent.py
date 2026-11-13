@@ -26,7 +26,7 @@ class Agent(nn.Module):
         super().__init__()
         self.world_model = build_world_model(cfg.wm, cfg.action_dim)
         self.is_rssm = isinstance(self.world_model.sequence_model, RSSM)
-        self.latent_size = cfg.wm.latent.num_categories * cfg.wm.latent.num_codes
+        self.latent_size = cfg.wm.latent_size
 
         input_dim = self.latent_size + self.world_model.sequence_model.output_dim
 
@@ -226,10 +226,14 @@ class Agent(nn.Module):
         )
         reward_pred = self.world_model.reward_predictor(head_state).mean().detach()
         continue_probs = self.world_model.continue_predictor(head_state).mean
-        # continue_pred = (continue_probs >= 0.5).float().squeeze(-1).detach()
         continue_pred = continue_probs.squeeze(-1).detach()
-        continue_pred[:, 0] = initial_continue
-        weights = torch.cumprod(continue_pred * self.gamma, 1).detach() / self.gamma
+        if self.is_rssm:
+            continue_pred[:, 0] = initial_continue
+            weights = torch.cumprod(continue_pred * self.gamma, 1).detach() / self.gamma
+        else:
+            alive = torch.cat([torch.ones_like(continue_pred[:, :1]), continue_pred[:, :-1]], 1)
+            discount = self.gamma ** torch.arange(alive.shape[1], device=alive.device)
+            weights = (torch.cumprod(alive, 1) * discount).detach()
         actor_state = make_state(latents, actor_seq).detach()
         values, value_logits = self.critic(actor_state)
         value_targets, _ = self.critic_target(actor_state)

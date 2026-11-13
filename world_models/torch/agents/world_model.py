@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 from torch import nn
 from torch.distributions import Independent, OneHotCategoricalStraightThrough, kl_divergence
 
@@ -27,6 +28,7 @@ class WorldModel(nn.Module):
         continue_coef=1.0,
         free_nats=1.0,
         use_combined_state=False,
+        prediction_obj="kl_div",
     ):
         super().__init__()
         self.encoder = encoder
@@ -47,6 +49,8 @@ class WorldModel(nn.Module):
         self.reward_coef = reward_coef
         self.continue_coef = continue_coef
         self.free_nats = free_nats
+
+        self.prediction_obj = prediction_obj
 
     def initial_state(self, batch_size, device):
         return self.sequence_model.initial_state(batch_size, device)
@@ -178,8 +182,11 @@ class WorldModel(nn.Module):
             + repr_loss * self.repr_coef
         )
 
-        loss_dict["wm/loss/KL_div"] = to_numpy(dyn_loss)
-        loss_dict["wm/loss/unclipped_KL"] = to_numpy(unclipped_kl)
+        if self.prediction_obj == "kl_div":
+            loss_dict["wm/loss/KL_div"] = to_numpy(dyn_loss)
+            loss_dict["wm/loss/unclipped_KL"] = to_numpy(unclipped_kl)
+        elif self.prediction_obj == "mse":
+            loss_dict["wm/loss/mse_prediction"] = to_numpy(dyn_loss)
         loss_dict = loss_dict | head_loss_dict
         return (
             loss,
@@ -200,15 +207,25 @@ class WorldModel(nn.Module):
         }
 
     def dynamics_loss(self, post_logits, prior_logits):
-        latent_post = Independent(OneHotCategoricalStraightThrough(logits=post_logits.detach()), 1)
-        latent_prior = Independent(OneHotCategoricalStraightThrough(logits=prior_logits), 1)
-        kl_div = kl_divergence(latent_post, latent_prior)
-        return torch.clip(kl_div, min=self.free_nats).mean(), kl_div.mean()
+        if self.prediction_obj == "kl_div":
+            latent_post = Independent(
+                OneHotCategoricalStraightThrough(logits=post_logits.detach()), 1
+            )
+            latent_prior = Independent(OneHotCategoricalStraightThrough(logits=prior_logits), 1)
+            kl_div = kl_divergence(latent_post, latent_prior)
+            return torch.clip(kl_div, min=self.free_nats).mean(), kl_div.mean()
+        elif self.prediction_obj == "mse":
+            mse_loss = F.mse_loss(post_logits.detach(), prior_logits)
+            return mse_loss, mse_loss
 
     def representation_loss(self, post_logits, prior_logits):
-        latent_post = Independent(OneHotCategoricalStraightThrough(logits=post_logits), 1)
-        latent_prior = Independent(
-            OneHotCategoricalStraightThrough(logits=prior_logits.detach()), 1
-        )
-        kl_div = kl_divergence(latent_post, latent_prior)
-        return torch.clip(kl_div, min=self.free_nats).mean()
+        if self.prediction_obj == "kl_div":
+            latent_post = Independent(OneHotCategoricalStraightThrough(logits=post_logits), 1)
+            latent_prior = Independent(
+                OneHotCategoricalStraightThrough(logits=prior_logits.detach()), 1
+            )
+            kl_div = kl_divergence(latent_post, latent_prior)
+            return torch.clip(kl_div, min=self.free_nats).mean()
+        elif self.prediction_obj == "mse":
+            mse_loss = F.mse_loss(post_logits, prior_logits.detach())
+            return mse_loss

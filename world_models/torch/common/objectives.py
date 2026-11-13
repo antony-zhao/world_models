@@ -5,9 +5,11 @@ from torch import nn
 from torch.nn import functional as F
 
 from world_models.torch.agents.actor_critic import Actor, Critic
+from world_models.torch.common.augments import random_shift
 from world_models.torch.common.decoders import ConvDecoder
 from world_models.torch.common.models import MLP, TargetNetwork
 from world_models.torch.common.utils import (
+    SIGReg,
     compute_lambda_returns,
     init_last_layer,
     symlog_squared_error,
@@ -121,7 +123,15 @@ class ActionObjective(RepresentationObjective):
         super().__init__(cfg)
         self.action_type = cfg.action_type
         self.rssm = cfg.type == "rssm"
-        input_dim = cfg.embedding_dim + cfg.joint_state_dim
+        # "state": (z, seq_state, next obs embedding), the MuDreamer-style input.
+        # "latent_pair": (z_t, z_{t+1}) -> a_t. No sequence state, which holds the past actions
+        # and lets the head guess a repeated action, and no conv embedding, so the latent itself
+        # has to carry what the action changed.
+        self.inputs = cfg.get("inputs", "state")
+        if self.inputs == "latent_pair":
+            input_dim = 2 * cfg.latent_size
+        else:
+            input_dim = cfg.embedding_dim + cfg.joint_state_dim
         self.action_predictor = Actor(
             input_dim,
             cfg.action_dim,
@@ -135,24 +145,34 @@ class ActionObjective(RepresentationObjective):
         )  # repurposing actor since it shares most of the same architecture
 
     def forward(self, context):
-        states = context["states"][:, :-1]  # rssm has (B, T-1), transformer has (B, 1:T-1)
-        if self.rssm:
-            next_in = context["obs_embeddings"][:, 1:]
-            mask = 1 - context["terminated"][:, :-1].float()
+        if self.inputs == "latent_pair":
+            # a_t is the action taken at o_t, the one leading to o_{t+1}; pairs that straddle a
+            # reset or life loss are masked out
+            latents = context["latents"].flatten(2)
+            combined_in = torch.cat([latents[:, :-1], latents[:, 1:]], -1)
+            mask = 1 - context["dones"][:, :-1].float()
             targets = context["actions"][:, :-1]
         else:
-            next_in = context["obs_embeddings"][:, 2:]
-            mask = 1 - context["terminated"][:, 1:-1].float()
-            targets = context["actions"][:, 1:-1]
-        combined_in = torch.cat([states, next_in], -1)
+            states = context["states"][:, :-1]  # rssm has (B, T-1), transformer has (B, 1:T-1)
+            if self.rssm:
+                next_in = context["obs_embeddings"][:, 1:]
+                mask = 1 - context["terminated"][:, :-1].float()
+                targets = context["actions"][:, :-1]
+            else:
+                next_in = context["obs_embeddings"][:, 2:]
+                mask = 1 - context["terminated"][:, 1:-1].float()
+                targets = context["actions"][:, 1:-1]
+            combined_in = torch.cat([states, next_in], -1)
         action_dist = self.action_predictor.policy_dist(combined_in)
         if self.action_type == "discrete":
             targets = targets.argmax(-1)
         prediction_loss = -(action_dist.log_prob(targets) * mask).sum() / mask.sum()
 
-        return self.weight * prediction_loss, {
-            "wm/loss/action_prediction_loss": prediction_loss.item(),
-        }
+        metrics = {"wm/loss/action_prediction_loss": prediction_loss.item()}
+        if self.action_type == "discrete":
+            correct = (action_dist.probs.argmax(-1) == targets).float()
+            metrics["wm/stats/action_prediction_acc"] = ((correct * mask).sum() / mask.sum()).item()
+        return self.weight * prediction_loss, metrics
 
 
 class ValueObjective(RepresentationObjective):
@@ -381,34 +401,60 @@ class ContrastiveTrajectoryObjective(RepresentationObjective):
         return self.weight * loss, stats
 
 
-class TemporalConsistencyObjective(RepresentationObjective):
+class LeJEPAObjective(RepresentationObjective):
     def __init__(self, cfg):
         super().__init__(cfg)
-        self.rssm = cfg.type == "rssm"
-        self.predictor = MLP(
-            cfg.d_model, cfg.embedding_dim, cfg.hidden_dim, cfg.num_hiddens, cfg.norm
-        )
+        assert cfg.type != "rssm"
+        self.lam = cfg.lam
+        proj_dim = cfg.get("proj_dim", None)
+        if proj_dim is not None:
+            self.proj = MLP(cfg.latent_size, proj_dim, cfg.hidden_dim, cfg.num_hiddens, cfg.norm)
+        else:
+            self.proj = None
+        self.sigreg_target = cfg.get("sigreg_target", "latent")
+        if self.sigreg_target != "latent":
+            assert proj_dim is not None
+        self.sigreg = SIGReg()
 
-    # def forward(self, context):
-    #     if self.rssm:
-    #         seq_states = context["seq_states"][:, 1:]
-    #         embedding_targets = context["obs_embeddings"][:, 1:].detach()
-    #     else:
-    #         seq_states = context["seq_states"][:, :-1]
-    #         embedding_targets = context["obs_embeddings"][:, 1:].detach()
-    #     embedding_predictions = self.cdp_predictor(seq_states)
-    #     target_norm = embedding_targets.norm(dim=1)
-    #     pred_norm = embedding_predictions.norm(dim=1)
-    #     cos_sim = -F.cosine_similarity(
-    #         embedding_targets, embedding_predictions, dim=1, eps=1e-5
-    #     ).mean()  # no dim=-1 worked for some reason, something to look at
-    #     return self.weight * cos_sim, {
-    #         "wm/loss/cdp_loss": cos_sim.item(),
-    #         "wm/stats/cdp_target_norm_min": target_norm.min().item(),
-    #         "wm/stats/cdp_target_norm_mean": target_norm.mean().item(),
-    #         "wm/stats/cdp_pred_norm_min": pred_norm.min().item(),
-    #         "wm/stats/cdp_pred_norm_mean": pred_norm.mean().item(),
-    #     }
+        if cfg.augment == "shift_intensity":
+            self.augment = random_shift(
+                cfg.views, pad=cfg.get("pad", 4), intensity=cfg.get("intensity", 0.05)
+            )
+
+    def forward(self, context):
+        metrics = {}
+        obs = context["obs"].flatten(0, 1)
+        wm = context["world_model"]
+        clean = context["latents"].flatten(0, 1)
+        augmented_views = self.augment(obs)
+
+        # Should be shape of (V, K, D)
+        augmented_embed = wm.posterior(wm.encoder(augmented_views)).mode
+
+        if self.proj is not None:
+            proj_target = self.proj(clean)
+            proj_aug = self.proj(augmented_embed)
+            view_loss = (proj_aug - proj_target).pow(2).mean()
+        else:
+            view_loss = (augmented_embed - clean).pow(2).mean()
+
+        if self.sigreg_target == "latent":
+            sigreg_loss = self.sigreg(torch.cat([augmented_embed, clean[None]], 0))
+        elif self.sigreg_target == "proj":
+            sigreg_loss = self.sigreg(torch.cat([proj_aug, proj_target[None]], 0))
+        elif self.sigreg_target == "both":
+            sigreg_latent = self.sigreg(torch.cat([augmented_embed, clean[None]], 0))
+            sigreg_proj = self.sigreg(torch.cat([proj_aug, proj_target[None]], 0))
+            metrics["wm/loss/sigreg_latent"] = sigreg_latent.item()
+            metrics["wm/loss/sigreg_proj"] = sigreg_proj.item()
+            sigreg_loss = sigreg_latent + sigreg_proj
+
+        loss = view_loss + sigreg_loss * self.lam
+        return self.weight * loss, metrics | {
+            "wm/loss/lejepa_loss": loss.item(),
+            "wm/loss/view_loss": view_loss.item(),
+            "wm/loss/sigreg_loss": sigreg_loss.item(),
+        }
 
 
 class Plan2Explore(RepresentationObjective):

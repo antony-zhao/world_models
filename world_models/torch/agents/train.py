@@ -15,7 +15,6 @@ import ale_py
 import gymnasium as gym
 import numpy as np
 import torch
-from gymnasium.wrappers.vector import TransformObservation
 from omegaconf import OmegaConf
 
 from world_models.torch.agents.agent import Agent
@@ -58,19 +57,20 @@ def build_envs(cfg):
         stack_num=1,
         frameskip=4,
         maxpool=True,
-        noop_max=30,
         episodic_life=False,
         life_loss_info=False,  # `terminated` only on game over (DreamerV3 `lives: unused`)
         reward_clipping=False,
-        repeat_action_probability=0.0,
+        # sticky actions, train and eval. 0.0 is the usual Atari100k setting; ALE v5's own
+        # default, which the STORM reference code inherits, is 0.25
+        repeat_action_probability=cfg.env.get("repeat_action_probability", 0.0),
         use_fire_reset=False,
         full_action_space=False,
         autoreset_mode=gym.vector.AutoresetMode.SAME_STEP,
     )
     single_space = gym.spaces.Box(0, 255, (3, 64, 64), np.uint8)
 
-    def make(num):
-        env = ale_py.AtariVectorEnv(game=cfg.env.game, num_envs=num, **common)
+    def make(num, noop_max):
+        env = ale_py.AtariVectorEnv(game=cfg.env.game, num_envs=num, noop_max=noop_max, **common)
         batch_space = gym.spaces.Box(0, 255, (num, 3, 64, 64), np.uint8)
         return ChannelFirst(env, batch_space, single_space)
         # return TransformObservation(
@@ -80,12 +80,28 @@ def build_envs(cfg):
         #     single_observation_space=single_space,
         # )
 
-    train_envs = make(cfg.num_envs)
-    eval_envs = make(cfg.num_eval_envs)
+    # train_noop_max=0 with no sticky actions makes every training episode start from the same
+    # state (the STORM reference reseeds on every reset and has no no-op starts). Eval keeps
+    # the standard 30 no-ops either way.
+    train_envs = make(cfg.num_envs, cfg.env.get("train_noop_max", 30))
+    eval_envs = make(cfg.num_eval_envs, 30)
     # Seed the vector action-space RNG so prefill / any .sample() is reproducible.
     train_envs.action_space.seed(cfg.seed)
     eval_envs.action_space.seed(cfg.seed + EVAL_SEED_OFFSET)
     return train_envs, eval_envs
+
+
+def with_life_loss(terms, truncs, infos, prev_lives):
+    """Mark life loss as terminal for the buffer, without resetting the env.
+
+    STORM / DRAMA / IRIS-train convention. Under SAME_STEP autoreset, infos["lives"]
+    at a game-over step already belongs to the new game, so those steps are excluded
+    (they're terminal anyway via `terms`). Games without lives (lives stays 0) are
+    unaffected. Returns (terms_for_buffer, updated prev_lives).
+    """
+    game_over = terms | truncs
+    life_loss = (infos["lives"] < prev_lives) & ~game_over
+    return terms | life_loss, infos["lives"].copy()
 
 
 # ----------------------------------------------------------------- eval
@@ -134,10 +150,11 @@ def evaluate(agent, env, num_episodes, eval_seed=None):
 # --------------------------------------------------------------- training
 
 
-def prefill_buffer(agent, envs, cfg, initial_obs):
+def prefill_buffer(agent, envs, cfg, initial_obs, prev_lives):
     obs = initial_obs
     episode_returns = np.zeros(cfg.num_envs, dtype=np.float32)
     completed = []
+    life_loss_terminal = cfg.env.get("life_loss_terminal", False)
 
     print(f"Prefilling buffer with {cfg.train.prefill_steps} random steps...")
     for _ in range(cfg.train.prefill_steps):
@@ -145,6 +162,8 @@ def prefill_buffer(agent, envs, cfg, initial_obs):
         next_obs, rewards, terms, truncs, infos = envs.step(actions)
         # life_loss_info=False => `terms` is game over only.
         terms_for_buffer = terms
+        if life_loss_terminal:
+            terms_for_buffer, prev_lives = with_life_loss(terms, truncs, infos, prev_lives)
         agent.add_transition(obs, actions, rewards, terms_for_buffer, truncs)
         episode_returns += rewards
         # Full-game boundary for return tracking.
@@ -157,7 +176,7 @@ def prefill_buffer(agent, envs, cfg, initial_obs):
         f"  prefill complete. mean random-policy return: "
         f"{np.mean(completed) if completed else 0:.2f}"
     )
-    return obs, episode_returns
+    return obs, episode_returns, prev_lives
 
 
 def save_checkpoint(agent, path: Path, env_step: int):
@@ -224,10 +243,15 @@ def main(cfg_path: str, overrides: list[str] = None):
     print(f"Agent built. WM params: {wm_params:,}  AC params: {ac_params:,}")
 
     # ---- initial reset (seeds the training env stream deterministically)
-    initial_obs, _ = train_envs.reset(seed=cfg.seed)
+    initial_obs, reset_info = train_envs.reset(seed=cfg.seed)
+    prev_lives = reset_info["lives"].copy()
+    life_loss_terminal = cfg.env.get("life_loss_terminal", False)
+    print(f"life_loss_terminal={life_loss_terminal}")
 
     # ---- prefill
-    obs, episode_returns = prefill_buffer(agent, train_envs, cfg, initial_obs)
+    obs, episode_returns, prev_lives = prefill_buffer(
+        agent, train_envs, cfg, initial_obs, prev_lives
+    )
     completed_returns = []
 
     # ---- main loop
@@ -239,8 +263,10 @@ def main(cfg_path: str, overrides: list[str] = None):
         actions = agent.act(obs.astype(np.float32))
         next_obs, rewards, terms, truncs, infos = train_envs.step(actions)
         # life_loss_info=False => `terms` is game over only,
-        # which is exactly what we want in the buffer (STORM convention).
+        # life_loss_terminal additionally marks life loss as terminal (no reset).
         terms_for_buffer = terms
+        if life_loss_terminal:
+            terms_for_buffer, prev_lives = with_life_loss(terms, truncs, infos, prev_lives)
         agent.add_transition(obs, actions, rewards, terms_for_buffer, truncs)
 
         episode_returns += rewards

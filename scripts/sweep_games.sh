@@ -7,12 +7,12 @@
 #   ./scripts/sweep_games.sh <config> --games "pong breakout"
 #
 # Default games, picked for different dynamics:
-#   pong      simple, near-solved sanity check
-#   breakout  periodic ball dynamics
-#   boxing    18 actions, dense reward
-#   freeway   sparse reward / exploration
+#   pong      small ball, position precision
+#   breakout  periodic ball dynamics, high seed variance
 #   ms_pacman maze, static per-level context
 #   krull     large reward scale
+#   seaquest  many small objects + oxygen bar
+# Also useful via --games: boxing (easy, dense reward), kung_fu_master, frostbite
 #
 # Each run logs to: $LOG_ROOT/<game>_seed<N>/<train.py run name>/
 # Tensorboard:  tensorboard --logdir $LOG_ROOT
@@ -21,7 +21,7 @@ set -euo pipefail
 
 CONFIG="${1:?usage: $0 <config.yaml> [--games \"...\"] [--seeds N] [--jobs N] [--log-root DIR]}"
 shift
-GAMES="${GAMES:-pong breakout boxing freeway ms_pacman krull}"
+GAMES="${GAMES:- ms_pacman krull seaquest}"
 SEEDS="${SEEDS:-1}"
 JOBS="${JOBS:-1}"
 LOG_ROOT="${LOG_ROOT:-./runs/atari100k/$(basename "$CONFIG" .yaml)_games_$(date +%Y%m%d-%H%M%S)}"

@@ -50,7 +50,7 @@ wm:
     d_model: 512
     n_layers: 1
     num_heads: 8
-    max_seq_len: 256
+    max_seq_len: 64   # KV cache length; imagination uses ac_seq_len + horizon (24) positions
     expand: 2
     dropout_p: 0.1
     use_sdpa: true

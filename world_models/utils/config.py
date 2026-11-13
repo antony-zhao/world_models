@@ -46,13 +46,23 @@ def preprocess_config(cfg: DictConfig) -> DictConfig:
     """Fill in cross-field defaults from shared sections."""
     OmegaConf.set_struct(cfg, False)
 
-    # ---- Propagate latent dims to posterior/prior ----
+    # ---- Propagate latent type/dims to posterior/prior ----
+    # latent.type: "categorical" (num_categories x num_codes one-hots) or "continuous" (latent.dim)
+    latent = cfg.wm.latent
+    _set_if_missing(latent, "type", "categorical")
     for section_name in ["posterior", "prior"]:
         section = cfg.wm[section_name]
-        _set_if_missing(section, "num_categories", cfg.wm.latent.num_categories)
-        _set_if_missing(section, "num_codes", cfg.wm.latent.num_codes)
+        _set_if_missing(section, "latent_type", latent.type)
+        if latent.type == "categorical":
+            _set_if_missing(section, "num_categories", latent.num_categories)
+            _set_if_missing(section, "num_codes", latent.num_codes)
 
-    cfg.wm.latent_size = cfg.wm.latent.num_categories * cfg.wm.latent.num_codes
+    if latent.type == "categorical":
+        cfg.wm.latent_size = latent.num_categories * latent.num_codes
+    elif latent.type == "continuous":
+        cfg.wm.latent_size = latent.dim
+    else:
+        raise ValueError(f"Unknown latent type: {latent.type}")
     cfg.wm.joint_state_dim = cfg.wm.latent_size + cfg.wm.sequence_model.d_model
 
     # ---- Propagate hidden_dim from model.hidden_dim ----

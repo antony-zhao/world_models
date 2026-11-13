@@ -4,13 +4,14 @@ from world_models.buffers.buffers import PerEnvBuffer
 from world_models.torch.agents.actor_critic import Actor, Critic
 from world_models.torch.agents.world_model import WorldModel
 from world_models.torch.common.encoders import ConvEncoder
-from world_models.torch.common.heads import BernoulliHead, CategoricalHead, TwoHotHead
+from world_models.torch.common.heads import BernoulliHead, CategoricalHead, IdentityHead, TwoHotHead
 from world_models.torch.common.models import Posterior, Prior
 from world_models.torch.common.objectives import (
     ActionObjective,
     CDPObjective,
     CompoundObjective,
     ContrastiveTrajectoryObjective,
+    LeJEPAObjective,
     ReconstructionObjective,
     ValueObjective,
 )
@@ -76,8 +77,14 @@ def build_sequence_model(cfg, latent_size, action_dim):
         raise NotImplementedError
 
 
+def build_latent_head(cfg):
+    if cfg.latent_type == "categorical":
+        return CategoricalHead(cfg.num_categories, cfg.num_codes, cfg.unimix_prob)
+    return IdentityHead()
+
+
 def build_posterior(cfg, embed_dim, latent_size, d_model, includes_sequence_state):
-    dist_head = CategoricalHead(cfg.num_categories, cfg.num_codes, cfg.unimix_prob)
+    dist_head = build_latent_head(cfg)
     return Posterior(
         embed_dim,
         latent_size,
@@ -91,7 +98,7 @@ def build_posterior(cfg, embed_dim, latent_size, d_model, includes_sequence_stat
 
 
 def build_prior(cfg, d_model, latent_size):
-    dist_head = CategoricalHead(cfg.num_categories, cfg.num_codes, cfg.unimix_prob)
+    dist_head = build_latent_head(cfg)
     return Prior(
         d_model,
         latent_size,
@@ -133,6 +140,8 @@ def build_objective(cfg):
             objectives.append(CDPObjective(obj_cfg))
         elif obj_cfg.name == "contrastive":
             objectives.append(ContrastiveTrajectoryObjective(obj_cfg))
+        elif obj_cfg.name == "lejepa":
+            objectives.append(LeJEPAObjective(obj_cfg))
         else:
             raise ValueError(f"Unknown objective: {obj_cfg.name}")
 
@@ -144,19 +153,27 @@ def build_objective(cfg):
 def build_wm_optimizer(cfg, world_model):
     default_lr = cfg.wm_lr
     encoder_lr = cfg.get("encoder_lr", default_lr)
+    posterior_lr = cfg.get("posterior_lr", default_lr)
+    prior_lr = cfg.get("prior_lr", default_lr)
     seq_lr = cfg.get("sequence_model_lr", default_lr)
     obj_lr = cfg.get("objective_lr", default_lr)
 
     encoder_params = list(world_model.encoder.parameters())
+    posterior_params = list(world_model.posterior.parameters())
+    prior_params = list(world_model.prior.parameters())
     seq_params = list(world_model.sequence_model.parameters())
     obj_params = list(world_model.objective.parameters())
 
-    seen = set(id(p) for p in encoder_params + seq_params + obj_params)
+    seen = set(
+        id(p) for p in encoder_params + posterior_params + prior_params + seq_params + obj_params
+    )
     other_params = [p for p in world_model.parameters() if id(p) not in seen]
 
     return optim.Adam(
         [
             {"params": encoder_params, "lr": encoder_lr},
+            {"params": posterior_params, "lr": posterior_lr},
+            {"params": prior_params, "lr": prior_lr},
             {"params": seq_params, "lr": seq_lr},
             {"params": obj_params, "lr": obj_lr},
             {"params": other_params, "lr": default_lr},
@@ -166,7 +183,7 @@ def build_wm_optimizer(cfg, world_model):
 
 
 def build_world_model(cfg, action_dim) -> WorldModel:
-    latent_size = cfg.latent.num_categories * cfg.latent.num_codes
+    latent_size = cfg.latent_size  # set by preprocess_config for either latent type
     encoder = build_encoder(cfg.encoder)
     sequence_model = build_sequence_model(cfg.sequence_model, latent_size, action_dim)
     d_model = cfg.sequence_model.d_model
@@ -194,6 +211,7 @@ def build_world_model(cfg, action_dim) -> WorldModel:
         cfg.continue_coef,
         cfg.free_nats,
         cfg.use_combined_state,
+        prediction_obj=cfg.get("latent_loss", "kl_div"),
     )
 
 

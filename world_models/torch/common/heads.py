@@ -2,7 +2,11 @@ import torch
 from torch import nn
 from torch.distributions import Bernoulli, Distribution, Independent
 
-from world_models.torch.common.distributions import DiscreteLatentDist, TwoHotEncoding
+from world_models.torch.common.distributions import (
+    DeterministicLatentDist,
+    DiscreteLatentDist,
+    TwoHotEncoding,
+)
 from world_models.torch.common.models import MLP
 from world_models.torch.common.utils import init_last_layer, symexp, symlog, unimix
 
@@ -20,6 +24,14 @@ class CategoricalHead(nn.Module):
         probs = torch.softmax(reshaped_logits, -1)
         unimixed_probs = unimix(probs, self.num_codes, self.unimix_prob)
         return DiscreteLatentDist(probs=unimixed_probs)
+
+
+class IdentityHead(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, logits):
+        return DeterministicLatentDist(value=logits)
 
 
 class GaussianHead(nn.Module):
