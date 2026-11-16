@@ -29,6 +29,7 @@ class WorldModel(nn.Module):
         free_nats=1.0,
         use_combined_state=False,
         prediction_obj="kl_div",
+        head_stop_grad=False,
     ):
         super().__init__()
         self.encoder = encoder
@@ -51,6 +52,7 @@ class WorldModel(nn.Module):
         self.free_nats = free_nats
 
         self.prediction_obj = prediction_obj
+        self.head_stop_grad = head_stop_grad
 
     def initial_state(self, batch_size, device):
         return self.sequence_model.initial_state(batch_size, device)
@@ -151,8 +153,9 @@ class WorldModel(nn.Module):
             continue_dist = self.continue_predictor(head_states)
             reward_twohot = self.reward_predictor(head_states)
         else:
-            continue_dist = self.continue_predictor(seq_states)
-            reward_twohot = self.reward_predictor(seq_states)
+            head_states = seq_states
+            continue_dist = self.continue_predictor(head_states)
+            reward_twohot = self.reward_predictor(head_states)
         context = {
             "obs": transformed_obs,
             "actions": actions,

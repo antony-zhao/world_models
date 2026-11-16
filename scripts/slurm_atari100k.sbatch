@@ -21,8 +21,9 @@
 #    6 boxing          13 gopher          20 pong
 
 #SBATCH --job-name=a100k
-#SBATCH --partition=aa100          # CHECK: your GPU partition
-#SBATCH --gres=gpu:1
+#SBATCH --partition=aa100
+#SBATCH --qos=gpu-normal           # 24 h max; gpu-long allows 7 days at lower priority
+#SBATCH --gres=gpu:1               # CURC docs use a typed form, e.g. gpu:a100-40gb:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=24G

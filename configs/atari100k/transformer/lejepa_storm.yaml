@@ -36,8 +36,8 @@ wm:
   latent_loss: mse     # kl (categorical) or mse (continuous): dyn/repr terms as MSE
 
   obj_coef: 1.0
-  dyn_coef: 1.0
-  repr_coef: 1.0
+  dyn_coef: 2.0
+  repr_coef: 2.0
   head_coef: 1.0
   reward_coef: 1.0
   continue_coef: 1.0
@@ -74,16 +74,12 @@ wm:
   objectives:
     - name: lejepa
       views: 1
-      weight: 1.0
+      weight: 8.0
       target: full
-      lam: 0.05         # SIGReg weight; LeJEPA uses ~0.01-0.05, check view_loss vs lam*sigreg early
+      lam: 0.01         # SIGReg weight; LeJEPA uses ~0.01-0.05, check view_loss vs lam*sigreg early
       augment: shift_intensity  # random shift (replicate pad) + intensity; maps to a function
       pad: 4             # max shift in px, each direction (DrQ / SPR Atari100k standard)
       intensity: 0.05    # brightness jitter scale; 0 turns it off
-      # sigreg_target: both # latent, or proj, or both. both or proj need proj_dim
-      # proj_dim: 256
-      # num_hiddens: 0
-      # norm: layer
 
 actor:
   num_hiddens: 1
@@ -102,7 +98,7 @@ buffer:
 
 optim:
   wm_lr: 1.0e-4
-  encoder_lr: 3.0e-4
+  encoder_lr: 1.0e-4
   ac_lr: 3.0e-5
   wm_eps: 1.0e-8
   ac_eps: 1.0e-8

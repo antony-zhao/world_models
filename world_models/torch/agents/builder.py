@@ -212,6 +212,7 @@ def build_world_model(cfg, action_dim) -> WorldModel:
         cfg.free_nats,
         cfg.use_combined_state,
         prediction_obj=cfg.get("latent_loss", "kl_div"),
+        head_stop_grad=cfg.heads.get("stop_grad", False),
     )
 
 
