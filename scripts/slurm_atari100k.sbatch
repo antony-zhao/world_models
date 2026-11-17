@@ -31,7 +31,7 @@
 #SBATCH --time=12:00:00            # ~6 h alone on an A6000; margin for a slower node
 #SBATCH --array=0-25%3
 #SBATCH --output=slurm_logs/%x_%A_%a.out
-##SBATCH --account=CHANGE_ME       # uncomment if your allocation needs it
+#SBATCH --account=ucb871_asc1
 
 set -eo pipefail
 
