@@ -2,11 +2,15 @@ from abc import ABC, abstractmethod
 from typing import Tuple
 
 import torch
-from mamba_ssm.utils.generation import InferenceParams
 from torch import Tensor, nn
 
 from world_models.torch.common.models import MLP, DreamerGRU, MambaBlock, TransformerBlock
 from world_models.torch.common.utils import get_norm, make_state
+
+try:  # only the Mamba sequence model needs it
+    from mamba_ssm.utils.generation import InferenceParams
+except ImportError:
+    InferenceParams = None
 
 
 class SequenceModel(nn.Module, ABC):

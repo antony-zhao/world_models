@@ -1,11 +1,15 @@
 import copy
 
 import torch
-from mamba_ssm import Mamba2
 from torch import nn
 from torch.nn import functional as F
 
 from world_models.torch.common.utils import get_norm
+
+try:  # only the Mamba sequence model needs it; it has to be compiled against CUDA
+    from mamba_ssm import Mamba2
+except ImportError:
+    Mamba2 = None
 
 
 class SkipLinear(nn.Module):
@@ -293,6 +297,8 @@ class MambaBlock(nn.Module):
     ):
         super().__init__()
         self.norm = get_norm(norm, d_model)
+        if Mamba2 is None:
+            raise ImportError("mamba_ssm is not installed; it is required for the Mamba model")
         self.mamba = Mamba2(
             d_model=d_model,
             d_state=d_state,

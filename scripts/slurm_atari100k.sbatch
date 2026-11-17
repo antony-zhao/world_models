@@ -40,14 +40,20 @@ GAMES=(alien amidar assault asterix bank_heist battle_zone boxing breakout
   up_n_down)
 
 CONFIG="${CONFIG:-configs/atari100k/transformer/lejepa_storm.yaml}"
-SEED="${SEED:-1}"
+SEED="${SEED:-2}"
 OVERRIDES="${OVERRIDES:-}"
 LOG_ROOT="${LOG_ROOT:-./runs/atari100k/$(basename "$CONFIG" .yaml)_full}"
 
-# CHECK: however you activate the env on CURC
+# Personal Miniconda under /projects (2 GB home quota is too small for it) if present,
+# otherwise CURC's anaconda module. CONDA_ENV overrides the environment name.
 module purge
-module load anaconda
-conda activate world-models
+CONDA_BASE="${CONDA_BASE:-/projects/$USER/miniconda3}"
+if [[ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]]; then
+  source "$CONDA_BASE/etc/profile.d/conda.sh"
+else
+  module load anaconda
+fi
+conda activate "${CONDA_ENV:-world-models}"
 set -u  # after activation: conda's activate scripts trip on unset variables
 
 cd "$SLURM_SUBMIT_DIR"
