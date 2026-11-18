@@ -416,10 +416,17 @@ class LeJEPAObjective(RepresentationObjective):
             assert proj_dim is not None
         self.sigreg = SIGReg()
 
-        if cfg.augment == "shift_intensity":
+        if cfg.augment in ("shift_intensity", "roll_intensity"):
+            # roll_intensity: same as shift_intensity but a wrap-around roll; `pad` is then the
+            # maximum roll in px per axis
             self.augment = random_shift(
-                cfg.views, pad=cfg.get("pad", 4), intensity=cfg.get("intensity", 0.05)
+                cfg.views,
+                pad=cfg.get("pad", 4),
+                intensity=cfg.get("intensity", 0.05),
+                wrap=cfg.augment == "roll_intensity",
             )
+        else:
+            raise ValueError(f"unknown LeJEPA augment: {cfg.augment}")
 
     def forward(self, context):
         metrics = {}

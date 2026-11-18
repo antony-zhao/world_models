@@ -220,6 +220,10 @@ def main(cfg_path: str, overrides: list[str] = None):
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
     random.seed(cfg.seed)
+    # TF32 matmuls/convs on Ampere+ (inputs rounded to 10 mantissa bits, FP32 accumulate):
+    # ~19% faster per run on an A6000; turned on from the lam 0.05 sweep (2026-11-18) onward
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
     if getattr(cfg, "deterministic", False):
         # Full run-to-run determinism for debugging (costs some speed). See
         # https://pytorch.org/docs/stable/notes/randomness.html
