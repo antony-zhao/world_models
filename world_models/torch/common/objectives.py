@@ -415,6 +415,19 @@ class LeJEPAObjective(RepresentationObjective):
         if self.sigreg_target != "latent":
             assert proj_dim is not None
         self.sigreg = SIGReg()
+        # Which latents SIGReg tests. "batch": the training batch, B sequences of T consecutive
+        # frames, so it sees ~B tight clusters and pushes neighbouring frames apart to look
+        # Gaussian. "random": independently sampled single frames from the replay buffer (an
+        # extra encoder pass). "stride": every sigreg_stride-th time step of the training batch,
+        # from a random offset each step (no extra encoding). The view loss always uses the full
+        # training batch.
+        self.sigreg_samples = cfg.get("sigreg_samples", "batch")
+        assert self.sigreg_samples in ("batch", "random", "stride"), self.sigreg_samples
+        # SIGReg's value scales with its sample count, so fewer samples act as a smaller lam.
+        # random: None = same count as the training batch (B * T), keeping lam comparable with
+        # "batch". stride k: B * T / k samples, i.e. effectively lam / k.
+        self.sigreg_num_samples = cfg.get("sigreg_num_samples", None)
+        self.sigreg_stride = cfg.get("sigreg_stride", 4)
 
         if cfg.augment in ("shift_intensity", "roll_intensity"):
             # roll_intensity: same as shift_intensity but a wrap-around roll; `pad` is then the
@@ -445,13 +458,40 @@ class LeJEPAObjective(RepresentationObjective):
         else:
             view_loss = (augmented_embed - clean).pow(2).mean()
 
+        # latents SIGReg sees: the same clean + augmented pair, from the batch or from random frames
+        if self.sigreg_samples == "random":
+            n = self.sigreg_num_samples or clean.shape[0]
+            rand_obs = context["buffer"].sample_as_tensors(clean.device, n, seq_len=1)[0]
+            rand_obs = transform_obs(rand_obs, wm.is_image)
+            rand_obs = rand_obs.reshape(-1, *rand_obs.shape[-3:])  # (n, C, H, W)
+            sig_clean = wm.posterior(wm.encoder(rand_obs)).mode
+            sig_aug = wm.posterior(wm.encoder(self.augment(rand_obs))).mode
+            if self.proj is not None:
+                sig_proj_clean, sig_proj_aug = self.proj(sig_clean), self.proj(sig_aug)
+        elif self.sigreg_samples == "stride":
+            B, T = context["latents"].shape[:2]
+            k = self.sigreg_stride
+            offset = int(torch.randint(0, k, ()))
+
+            def every_kth(x):  # (..., B * T, F) -> (..., B * len(range(offset, T, k)), F)
+                x = x.reshape(*x.shape[:-2], B, T, x.shape[-1])
+                return x[..., offset::k, :].flatten(-3, -2)
+
+            sig_clean, sig_aug = every_kth(clean), every_kth(augmented_embed)
+            if self.proj is not None:
+                sig_proj_clean, sig_proj_aug = every_kth(proj_target), every_kth(proj_aug)
+        else:
+            sig_clean, sig_aug = clean, augmented_embed
+            if self.proj is not None:
+                sig_proj_clean, sig_proj_aug = proj_target, proj_aug
+
         if self.sigreg_target == "latent":
-            sigreg_loss = self.sigreg(torch.cat([augmented_embed, clean[None]], 0))
+            sigreg_loss = self.sigreg(torch.cat([sig_aug, sig_clean[None]], 0))
         elif self.sigreg_target == "proj":
-            sigreg_loss = self.sigreg(torch.cat([proj_aug, proj_target[None]], 0))
+            sigreg_loss = self.sigreg(torch.cat([sig_proj_aug, sig_proj_clean[None]], 0))
         elif self.sigreg_target == "both":
-            sigreg_latent = self.sigreg(torch.cat([augmented_embed, clean[None]], 0))
-            sigreg_proj = self.sigreg(torch.cat([proj_aug, proj_target[None]], 0))
+            sigreg_latent = self.sigreg(torch.cat([sig_aug, sig_clean[None]], 0))
+            sigreg_proj = self.sigreg(torch.cat([sig_proj_aug, sig_proj_clean[None]], 0))
             metrics["wm/loss/sigreg_latent"] = sigreg_latent.item()
             metrics["wm/loss/sigreg_proj"] = sigreg_proj.item()
             sigreg_loss = sigreg_latent + sigreg_proj

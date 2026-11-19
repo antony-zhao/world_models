@@ -316,8 +316,8 @@ def main(cfg_path: str, overrides: list[str] = None):
                 f"eval_return={eval_return:7.2f}"
             )
 
-        # Checkpoint
-        if env_step % cfg.train.checkpoint_every == 0:
+        # Checkpoint (checkpoint_every 0 / null: only checkpoint_final.pt at the end)
+        if cfg.train.checkpoint_every and env_step % cfg.train.checkpoint_every == 0:
             ckpt_path = log_dir / f"checkpoint_{env_step}.pt"
             save_checkpoint(agent, ckpt_path, env_step)
             save_checkpoint(agent, log_dir / "checkpoint_latest.pt", env_step)

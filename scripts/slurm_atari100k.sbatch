@@ -10,6 +10,7 @@
 #
 # Resubmitting skips games that already finished.
 # Runs land in:  runs/atari100k/<config>_full/<game>_seed<N>/<train.py run name>/
+# Only checkpoint_final.pt is saved; pass OVERRIDES="train.checkpoint_every=25000" for intermediates.
 #
 # Index -> game:
 #    0 alien            7 breakout        14 hero            21 private_eye
@@ -76,6 +77,7 @@ PYTHONUNBUFFERED=1 python -m world_models.torch.agents.train \
   env.game="$game" \
   seed="$SEED" \
   train.log_dir="$run_dir" \
+  train.checkpoint_every=0 \
   $OVERRIDES
 
 echo "finished ${game} at $(date)"
