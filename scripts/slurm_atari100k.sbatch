@@ -5,6 +5,7 @@
 #   sbatch scripts/slurm_atari100k.sbatch                      # all 26 games, 3 at a time
 #   sbatch --array=19 scripts/slurm_atari100k.sbatch           # one game (19 = ms_pacman)
 #   sbatch --array=0-8%3 scripts/slurm_atari100k.sbatch        # a subset
+#   sbatch --array=1,7,8,10,12,14,15,18,19,22,23,24%6 ...       # 12-game tuning subset
 #   sbatch --export=ALL,CONFIG=configs/atari100k/transformer/storm.yaml scripts/slurm_atari100k.sbatch
 #   sbatch --export=ALL,SEED=2,OVERRIDES="optim.ac_eps=1e-5" scripts/slurm_atari100k.sbatch
 #
@@ -27,8 +28,8 @@
 #SBATCH --gres=gpu:a100-40gb:1     # Alpine wants the type; the other is gpu:a100_80gb:1
 #SBATCH --nodes=1                  # Alpine rejects GPU jobs without it
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=24G
+#SBATCH --cpus-per-task=2          # 8-core jobs averaged ~1.7 cores busy (seff)
+#SBATCH --mem=8G                   # peak ~3 GiB on Atari100k
 #SBATCH --time=12:00:00            # ~6 h alone on an A6000; margin for a slower node
 #SBATCH --array=0-25%3
 #SBATCH --output=slurm_logs/%x_%A_%a.out
