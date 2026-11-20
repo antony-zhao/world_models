@@ -76,10 +76,12 @@ wm:
       views: 1
       weight: 8.0
       target: full
-      lam: 0.05         # SIGReg weight; LeJEPA uses ~0.01-0.05, check view_loss vs lam*sigreg early
+      lam: 0.2         # SIGReg weight; LeJEPA uses ~0.01-0.05, check view_loss vs lam*sigreg early
       augment: shift_intensity  # random shift (replicate pad) + intensity; maps to a function
       pad: 4             # max shift in px, each direction (DrQ / SPR Atari100k standard)
       intensity: 0.05    # brightness jitter scale; 0 turns it off
+      sigreg_samples: stride
+      sigreg_stride: 4
 
 actor:
   num_hiddens: 1
