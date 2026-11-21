@@ -12,6 +12,8 @@
 # Resubmitting skips games that already finished.
 # Runs land in:  runs/atari100k/<config>_full/<game>_seed<N>/<train.py run name>/
 # Only checkpoint_final.pt is saved; pass OVERRIDES="train.checkpoint_every=25000" for intermediates.
+# WANDB=<project> also mirrors the logs to Weights & Biases, grouped by LOG_ROOT name + seed
+# (needs `pip install wandb` and `wandb login` once on a login node; WANDB_MODE=offline if nodes lack internet).
 #
 # Index -> game:
 #    0 alien            7 breakout        14 hero            21 private_eye
@@ -45,6 +47,7 @@ GAMES=(alien amidar assault asterix bank_heist battle_zone boxing breakout
 CONFIG="${CONFIG:-configs/atari100k/transformer/lejepa_storm.yaml}"
 SEED="${SEED:-2}"
 OVERRIDES="${OVERRIDES:-}"
+WANDB="${WANDB:-}"
 LOG_ROOT="${LOG_ROOT:-./runs/atari100k/$(basename "$CONFIG" .yaml)_full}"
 
 # Personal Miniconda under /projects (2 GB home quota is too small for it) if present,
@@ -79,6 +82,7 @@ PYTHONUNBUFFERED=1 python -m world_models.torch.agents.train \
   seed="$SEED" \
   train.log_dir="$run_dir" \
   train.checkpoint_every=0 \
+  ${WANDB:+wandb.enabled=true wandb.project=$WANDB wandb.group=$(basename "$LOG_ROOT")_seed${SEED}} \
   $OVERRIDES
 
 echo "finished ${game} at $(date)"

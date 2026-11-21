@@ -213,6 +213,24 @@ def main(cfg_path: str, overrides: list[str] = None):
     log_dir = Path(cfg.train.log_dir) / run_name
     log_dir.mkdir(parents=True, exist_ok=True)
     OmegaConf.save(cfg, log_dir / "config.yaml")
+
+    # Optional Weights & Biases mirror of the TensorBoard logs (off unless wandb.enabled=true).
+    # sync_tensorboard must patch SummaryWriter before Logger creates it.
+    wandb_cfg = cfg.get("wandb") or {}
+    use_wandb = bool(wandb_cfg.get("enabled", False))
+    if use_wandb:
+        import wandb
+
+        wandb.init(
+            project=wandb_cfg.get("project", "world-models"),
+            entity=wandb_cfg.get("entity"),
+            group=wandb_cfg.get("group") or f"{config_parent}_{config_stem}",
+            name=f"{game_safe}_s{cfg.seed}_{datetime.now().strftime('%m%d-%H%M')}",
+            tags=list(wandb_cfg.get("tags") or []),
+            config=OmegaConf.to_container(cfg, resolve=False),
+            dir=str(log_dir),
+            sync_tensorboard=True,
+        )
     logger = Logger(str(log_dir))
     print(f"Logging to: {log_dir}")
 
@@ -325,6 +343,9 @@ def main(cfg_path: str, overrides: list[str] = None):
     save_checkpoint(agent, log_dir / "checkpoint_final.pt", env_step)
     train_envs.close()
     eval_envs.close()
+    if use_wandb:
+        logger.writer.close()  # flush the last events before wandb stops syncing
+        wandb.finish()
     print("Training complete.")
 
 
